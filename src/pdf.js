@@ -1,12 +1,13 @@
-// Self-made PDF reader/writer: just enough to merge, reorder, rotate and drop pages,
-// turn images into pages and shrink JPEG images. No rendering, no encryption.
+// Self-made PDF reader/writer: just enough to merge, reorder, rotate and drop pages, turn images
+// into pages, shrink images and draw page numbers, watermarks and stamps on top. No rendering.
 //
 // Reading follows pdf-lib's approach (found with REA): ignore the xref table and scan the
 // whole file for "N G obj" definitions, later definitions winning. Broken xref tables and
 // incremental updates then need no special handling.
 
-import { makeCipher, concat } from './decrypt.js'
-export { PasswordError } from './decrypt.js'
+import { makeCipher, makeEncryption, concat } from './crypt.js'
+import { glyphlessFont, GLYPH_WIDTH } from './glyphless.js'
+export { PasswordError } from './crypt.js'
 
 export class Name { constructor(v) { this.v = v } }
 const names = new Map()
@@ -281,12 +282,18 @@ export async function readPdf(bytes, password = '') {
 
 const norm = (deg) => (((Math.round(deg / 90) * 90) % 360) + 360) % 360
 
-// size in points (CropBox, else MediaBox) and the page's own rotation
-export function pageInfo(doc, i) {
+// the visible area (CropBox, else MediaBox) as [left, bottom, right, top]
+export function pageBox(doc, i) {
   const { attrs } = doc.pages[i]
   const box = doc.get(attrs.CropBox ?? attrs.MediaBox)
-  const [x0, y0, x1, y1] = Array.isArray(box) && box.length === 4 ? box.map((v) => Number(doc.get(v)) || 0) : [0, 0, 612, 792]
-  return { w: Math.abs(x1 - x0) || 612, h: Math.abs(y1 - y0) || 792, rotate: norm(Number(doc.get(attrs.Rotate)) || 0) }
+  const [a, b, c, d] = Array.isArray(box) && box.length === 4 ? box.map((v) => Number(doc.get(v)) || 0) : [0, 0, 612, 792]
+  return a === c || b === d ? [0, 0, 612, 792] : [Math.min(a, c), Math.min(b, d), Math.max(a, c), Math.max(b, d)]
+}
+
+// size in points and the page's own rotation
+export function pageInfo(doc, i) {
+  const [x0, y0, x1, y1] = pageBox(doc, i)
+  return { w: x1 - x0, h: y1 - y0, rotate: norm(Number(doc.get(doc.pages[i].attrs.Rotate)) || 0) }
 }
 
 // ---- writing ----
@@ -307,7 +314,8 @@ function serialize(v) {
 }
 
 // objects[n] is written as "n 0 obj"; objects[1] must be the catalog
-function writePdf(objects) {
+// trailer: extra trailer entries as a Map (Encrypt, ID)
+function writePdf(objects, trailer = new Map()) {
   const enc = new TextEncoder()
   const chunks = [], offsets = []
   let size = 0
@@ -324,7 +332,7 @@ function writePdf(objects) {
   }
   const xref = size
   push(`xref\n0 ${objects.length}\n0000000000 65535 f \n` + offsets.slice(1).map((o) => `${String(o).padStart(10, '0')} 00000 n \n`).join(''))
-  push(`trailer\n<</Size ${objects.length} /Root 1 0 R>>\nstartxref\n${xref}\n%%EOF\n`)
+  push(`trailer\n${serialize(new Map([['Size', objects.length], ['Root', new Ref(1)], ...trailer]))}\nstartxref\n${xref}\n%%EOF\n`)
   return concat(chunks)
 }
 
@@ -452,15 +460,246 @@ function mergeForms(docs, copiedOf, copy) {
   return form
 }
 
-// parts: [{ doc, index, rotate }] in output order; level: key of LEVELS or null
-export async function buildPdf(parts, level) {
+// ---- decorations: page numbers, watermark, stamps ----
+
+// Maps "display space" (points, origin at the bottom-left of the page as shown turned by `rot`) to PDF user space.
+export function displayMatrix([x0, y0, x1, y1], rot) {
+  return { 0: [1, 0, 0, 1, x0, y0], 90: [0, 1, -1, 0, x1, y0], 180: [-1, 0, 0, -1, x1, y1], 270: [0, -1, 1, 0, x0, y1] }[rot]
+}
+const displaySize = ([x0, y0, x1, y1], rot) => (rot % 180 ? [y1 - y0, x1 - x0] : [x1 - x0, y1 - y0])
+
+export const NUMBER_FORMATS = { n: (i) => `${i}`, of: (i, total) => `${i} / ${total}`, dash: (i) => `- ${i} -` }
+// Helvetica advance widths per 1000 units for the characters page numbers use; digits are 556
+const HELVETICA = { ' ': 278, '/': 278, '-': 333 }
+const textWidth = (s, size) => ([...s].reduce((w, c) => w + (HELVETICA[c] ?? 556), 0) * size) / 1000
+
+// image pixels as { width, height, rgb, alpha }: rgb has 3 bytes per pixel, alpha 1 (or null when opaque)
+export function splitRgba(px, width, height) {
+  const rgb = new Uint8Array(width * height * 3), alpha = new Uint8Array(width * height)
+  let opaque = true
+  for (let i = 0; i < width * height; i++) {
+    rgb[i * 3] = px[i * 4]
+    rgb[i * 3 + 1] = px[i * 4 + 1]
+    rgb[i * 3 + 2] = px[i * 4 + 2]
+    alpha[i] = px[i * 4 + 3]
+    if (alpha[i] < 255) opaque = false
+  }
+  return { width, height, rgb, alpha: opaque ? null : alpha }
+}
+
+// PDF text strings: UTF-16BE or UTF-8 with a byte order mark, else PDFDocEncoding (close enough to Latin-1)
+function decodeText(b) {
+  if (b[0] === 0xfe && b[1] === 0xff) return new TextDecoder('utf-16be').decode(b.subarray(2))
+  if (b[0] === 0xef && b[1] === 0xbb && b[2] === 0xbf) return new TextDecoder().decode(b.subarray(3))
+  return latin1(b)
+}
+
+// numbers: { pos: 'bc'|'br'|'bl'|'tc'|'tr'|'tl', format: key of NUMBER_FORMATS, start, size }
+// watermark: { image } centered on every page; part.overlays: [{ image, x, y, w, h, rot }] with x/y/w/h as
+// fractions of the page as shown turned by `rot` (origin top-left), so a stamp turns with its page later.
+// part.text: invisible text (OCR) in the page's own space, by line: [{ x, y, ux, uy, size, words: [{ text,
+// at, width }] }]. A line's baseline starts at (x, y) and runs along (ux, uy); each word starts `at` points
+// along it and spans `width`; glyphs are `size` tall. One text matrix per line, words moved along it, so
+// readers keep a tilted line together. Render mode 3 with the glyphless font: found and copied, never shown.
+// flatten: form fields painted into their pages and removed. A text field without an appearance stream, or
+// any text field when NeedAppearances says the stored ones may be stale, is drawn with textImage(value) ->
+// pixels when given (the browser draws Korean); without textImage the stored appearance is used, if any.
+async function decorate(out, alloc, pages, { numbers, watermark, flatten, textImage }) {
+  const enc = new TextEncoder()
+  const stale = out[1].get('AcroForm')?.get('NeedAppearances') === true
+  const images = new Map() // pixels -> Ref: a stamp used on many pages is stored once
+  const imageRef = async (img) => {
+    if (images.has(img)) return images.get(img)
+    const n = alloc()
+    images.set(img, new Ref(n))
+    out[n] = new Stream(imageDict(img.width, img.height, 'DeviceRGB', 'FlateDecode'), await deflate(img.rgb))
+    if (img.alpha) {
+      const m = alloc()
+      out[m] = new Stream(imageDict(img.width, img.height, 'DeviceGray', 'FlateDecode'), await deflate(img.alpha))
+      out[n].dict.set('SMask', new Ref(m))
+    }
+    return images.get(img)
+  }
+  const resolve = (v) => (v instanceof Ref ? out[v.num] : v)
+  let open = null // one shared "q" stream: the original content runs inside q ... Q
+  let ocrFont = null
+  const textFont = async () => (ocrFont ??= await glyphlessFontObjects(out, alloc))
+
+  for (const [i, { dict, box, view = box, rotate, overlays = [], text }] of pages.entries()) {
+    const ops = [], xobjects = new Map(), fonts = new Map()
+    const at = (rot, body, b = box) => ops.push(`q ${displayMatrix(b, rot).map(num).join(' ')} cm ${body} Q`)
+    const place = async (img, rot, x, y, w, h, b = box) => {
+      const name = `PTIm${xobjects.size}`
+      xobjects.set(name, await imageRef(img))
+      at(rot, `${num(w)} 0 0 ${num(h)} ${num(x)} ${num(y)} cm /${name} Do`, b)
+    }
+    if (flatten) await flattenWidgets(dict, resolve, ops, async (ref, img) => {
+      const name = `PTFm${xobjects.size}`
+      xobjects.set(name, ref ?? await imageRef(img))
+      return name
+    }, textImage, stale)
+    if (text?.length) { // null: the page had text of its own
+      fonts.set('PTOcr', await textFont())
+      const runs = text.filter((line) => line.size > 0).flatMap((line) => {
+        let at = 0
+        const words = line.words.flatMap((wd) => {
+          // UTF-16 code units are the character codes (Identity-H); outside the BMP becomes U+FFFD
+          const codes = [...wd.text].map((ch) => (ch.codePointAt(0) > 0xffff ? 0xfffd : ch.codePointAt(0)))
+          if (!codes.length || !(wd.width > 0)) return []
+          const scale = (100 * wd.width) / ((codes.length * line.size * GLYPH_WIDTH) / 1000)
+          const move = wd.at - at
+          at = wd.at
+          return [`${num(move)} 0 Td ${num(scale)} Tz <${codes.map((c) => c.toString(16).padStart(4, '0')).join('')}> Tj`]
+        })
+        return words.length ? [`/PTOcr ${num(line.size)} Tf ${[line.ux, line.uy, -line.uy, line.ux, line.x, line.y].map(num).join(' ')} Tm`, ...words] : []
+      })
+      if (runs.length) ops.push(`BT 3 Tr\n${runs.join('\n')}\nET`)
+    }
+    if (watermark) {
+      const [W, H] = displaySize(view, rotate), { width, height } = watermark.image
+      const s = Math.min((W * 0.8) / width, (H * 0.8) / height)
+      await place(watermark.image, rotate, (W - width * s) / 2, (H - height * s) / 2, width * s, height * s, view)
+    }
+    for (const o of overlays) {
+      if (!o.image) continue // redaction boxes: App burns those into a picture of the page
+      const [W, H] = displaySize(box, o.rot)
+      await place(o.image, o.rot, o.x * W, (1 - o.y - o.h) * H, o.w * W, o.h * H)
+    }
+    if (numbers) {
+      const [W, H] = displaySize(view, rotate), size = numbers.size ?? 10, margin = 28
+      const text = NUMBER_FORMATS[numbers.format ?? 'n'](numbers.start + i, numbers.start + pages.length - 1)
+      const width = textWidth(text, size)
+      const x = numbers.pos[1] === 'l' ? margin : numbers.pos[1] === 'r' ? W - margin - width : (W - width) / 2
+      const y = numbers.pos[0] === 'b' ? margin : H - margin - size * 0.72
+      fonts.set('PTHelv', new Map([['Type', N('Font')], ['Subtype', N('Type1')], ['BaseFont', N('Helvetica')], ['Encoding', N('WinAnsiEncoding')]]))
+      at(rotate, `0 g BT /PTHelv ${num(size)} Tf ${num(x)} ${num(y)} Td (${text}) Tj ET`, view)
+    }
+    if (!ops.length) continue
+
+    // a page's Resources may be shared with other pages: give this one its own copy
+    const res = new Map(resolve(dict.get('Resources')) ?? [])
+    for (const [kind, add] of [['XObject', xobjects], ['Font', fonts]]) {
+      if (add.size) res.set(kind, new Map([...(resolve(res.get(kind)) ?? []), ...add]))
+    }
+    dict.set('Resources', res)
+    if (!open) {
+      open = alloc()
+      out[open] = new Stream(new Map(), enc.encode('q\n'))
+    }
+    const decor = alloc()
+    out[decor] = new Stream(new Map(), enc.encode(`Q\n${ops.join('\n')}\n`))
+    const contents = resolve(dict.get('Contents'))
+    const list = Array.isArray(contents) ? contents : dict.has('Contents') ? [dict.get('Contents')] : []
+    dict.set('Contents', [new Ref(open), ...list, new Ref(decor)])
+  }
+  if (flatten) out[1].delete('AcroForm')
+}
+
+// The OCR text font: Type0 with Identity-H codes = UTF-16 code units, every code drawn with the one empty
+// glyph of the glyphless TrueType font, and a ToUnicode map giving each code back as itself.
+async function glyphlessFontObjects(out, alloc) {
+  const enc = new TextEncoder()
+  const stream = async (dict, data) => {
+    const n = alloc()
+    out[n] = new Stream(new Map([...dict, ['Filter', N('FlateDecode')]]), await deflate(data))
+    return new Ref(n)
+  }
+  const ttf = glyphlessFont()
+  const file = await stream(new Map([['Length1', ttf.length]]), ttf)
+  const toGid = new Uint8Array(65536 * 2)
+  for (let i = 1; i < toGid.length; i += 2) toGid[i] = 1 // every CID -> glyph 1
+  const hex = (n) => n.toString(16).padStart(2, '0').toUpperCase()
+  const ranges = Array.from({ length: 256 }, (_, h) => `<${hex(h)}00> <${hex(h)}FF> <${hex(h)}00>`) // a range may only vary its last byte
+  const cmap = ['/CIDInit /ProcSet findresource begin', '12 dict begin', 'begincmap',
+    '/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def', '/CMapName /Adobe-Identity-UCS def', '/CMapType 2 def',
+    '1 begincodespacerange', '<0000> <FFFF>', 'endcodespacerange',
+    ...[0, 100, 200].flatMap((from) => {
+      const part = ranges.slice(from, from + 100)
+      return [`${part.length} beginbfrange`, ...part, 'endbfrange']
+    }),
+    'endcmap', 'CMapName currentdict /CMap defineresource pop', 'end', 'end'].join('\n')
+  const descriptor = alloc()
+  out[descriptor] = new Map([
+    ['Type', N('FontDescriptor')], ['FontName', N('GlyphLessFont')], ['Flags', 5], ['FontBBox', [0, 0, GLYPH_WIDTH, 1000]],
+    ['ItalicAngle', 0], ['Ascent', 1000], ['Descent', 0], ['CapHeight', 1000], ['StemV', 80], ['FontFile2', file],
+  ])
+  const cid = alloc()
+  out[cid] = new Map([
+    ['Type', N('Font')], ['Subtype', N('CIDFontType2')], ['BaseFont', N('GlyphLessFont')],
+    ['CIDSystemInfo', new Map([['Registry', new Str(enc.encode('Adobe'))], ['Ordering', new Str(enc.encode('Identity'))], ['Supplement', 0]])],
+    ['FontDescriptor', new Ref(descriptor)], ['DW', GLYPH_WIDTH], ['CIDToGIDMap', await stream(new Map(), toGid)],
+  ])
+  const font = alloc()
+  out[font] = new Map([
+    ['Type', N('Font')], ['Subtype', N('Type0')], ['BaseFont', N('GlyphLessFont')], ['Encoding', N('Identity-H')],
+    ['DescendantFonts', [new Ref(cid)]], ['ToUnicode', await stream(new Map(), enc.encode(cmap))],
+  ])
+  return new Ref(font)
+}
+
+// Paints each widget's normal appearance where a viewer would (ISO 32000-2 §12.5.5: the form's BBox, turned
+// by its Matrix, is fitted to the Rect) and takes the widget off the page. Hidden widgets just go.
+// addXObject(ref, pixels) registers an XObject on the page and returns its name. stale: NeedAppearances is set.
+async function flattenWidgets(dict, resolve, ops, addXObject, textImage, stale) {
+  const annots = resolve(dict.get('Annots'))
+  if (!Array.isArray(annots)) return
+  const nums = (v) => (Array.isArray(resolve(v)) ? resolve(v).map((x) => Number(resolve(x)) || 0) : null)
+  const inherited = (a, key) => {
+    for (let d = a, depth = 0; d instanceof Map && depth < 32; d = resolve(d.get('Parent')), depth++) if (d.has(key)) return resolve(d.get(key))
+    return null
+  }
+  const keep = []
+  for (const ref of annots) {
+    const a = resolve(ref)
+    if (!(a instanceof Map) || a.get('Subtype') !== N('Widget')) {
+      keep.push(ref)
+      continue
+    }
+    const r = nums(a.get('Rect'))
+    if ((Number(resolve(a.get('F'))) & 2) || !r || r.length < 4) continue // Hidden
+    const [rx0, ry0, rx1, ry1] = [Math.min(r[0], r[2]), Math.min(r[1], r[3]), Math.max(r[0], r[2]), Math.max(r[1], r[3])]
+    let apRef = resolve(a.get('AP'))?.get?.('N') ?? null
+    if (resolve(apRef) instanceof Map) apRef = resolve(apRef).get(resolve(a.get('AS'))?.v) ?? null // on/off states
+    const ap = resolve(apRef)
+    const value = inherited(a, 'FT') === N('Tx') && inherited(a, 'V') instanceof Str ? decodeText(inherited(a, 'V').bytes) : null
+    // NeedAppearances: the stored picture of a text field may be stale, so draw the value itself
+    const redraw = textImage && value !== null && (stale || !(ap instanceof Stream))
+    if (!redraw && ap instanceof Stream && apRef instanceof Ref) {
+      const m = nums(ap.dict.get('Matrix')) ?? [1, 0, 0, 1, 0, 0], bb = nums(ap.dict.get('BBox')) ?? [0, 0, 1, 1]
+      const corners = [[bb[0], bb[1]], [bb[2], bb[1]], [bb[0], bb[3]], [bb[2], bb[3]]].map(([x, y]) => [m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]])
+      const xs = corners.map((c) => c[0]), ys = corners.map((c) => c[1])
+      const [bx0, by0, bx1, by1] = [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)]
+      if (bx1 - bx0 < 1e-6 || by1 - by0 < 1e-6) continue
+      const sx = (rx1 - rx0) / (bx1 - bx0), sy = (ry1 - ry0) / (by1 - by0)
+      ap.dict.set('Type', N('XObject'))
+      ap.dict.set('Subtype', N('Form'))
+      const name = await addXObject(apRef)
+      ops.push(`q ${[sx, 0, 0, sy, rx0 - bx0 * sx, ry0 - by0 * sy].map(num).join(' ')} cm /${name} Do Q`)
+    } else if (redraw) {
+      if (!value.trim()) continue
+      const img = await textImage(value)
+      const h = Math.min((ry1 - ry0) * 0.75, ((rx1 - rx0 - 4) * img.height) / img.width), w = (h * img.width) / img.height
+      const name = await addXObject(null, img)
+      ops.push(`q ${num(w)} 0 0 ${num(h)} ${num(rx0 + 2)} ${num(ry0 + (ry1 - ry0 - h) / 2)} cm /${name} Do Q`)
+    }
+  }
+  if (keep.length) dict.set('Annots', keep)
+  else dict.delete('Annots')
+}
+
+// parts: [{ doc, index, rotate, overlays?, crop?, text? } | { size: [w, h], rotate, overlays? }] in output order.
+// size makes a blank page; crop ([left, bottom, right, top] in the page's own space) narrows what shows;
+// text is an invisible OCR text layer (see decorate).
+// options: { level: 'lossless' or a key of LEVELS, gray: images to grayscale, numbers, watermark, flatten,
+// textImage (see decorate), impose: 1 | 2 | 4 (see impose), strip: drop hidden info, encrypt (see encryptAll) }
+export async function buildPdf(parts, { level, gray, numbers, watermark, flatten, textImage, impose: per, strip, encrypt } = {}) {
   const out = [null, null, null] // 1 catalog, 2 page tree
   const alloc = () => out.push(null) - 1
   const state = new Map() // doc -> { pages: srcNum -> newNum, copied: srcNum -> newNum }
   const st = (doc) => state.get(doc) ?? state.set(doc, { pages: new Map(), copied: new Map() }).get(doc)
   const slots = parts.map(({ doc, index }) => {
     const n = alloc()
-    const { ref } = doc.pages[index]
+    const ref = doc?.pages[index].ref
     if (ref instanceof Ref) st(doc).pages.set(ref.num, n)
     return n
   })
@@ -490,12 +729,17 @@ export async function buildPdf(parts, level) {
     return v
   }
 
-  parts.forEach(({ doc, index, rotate }, i) => {
+  parts.forEach(({ doc, index, rotate, size, crop }, i) => {
+    if (size) {
+      out[slots[i]] = new Map([['Type', N('Page')], ['Parent', new Ref(2)], ['MediaBox', [0, 0, ...size]], ['Rotate', norm(rotate)], ['Resources', new Map()]])
+      return
+    }
     const page = doc.pages[index]
     const d = copy(doc, page.dict)
     for (const k of INHERITED) if (page.attrs[k] !== undefined) d.set(k, copy(doc, page.attrs[k]))
     d.set('Parent', new Ref(2))
     d.set('Rotate', norm((Number(doc.get(page.attrs.Rotate)) || 0) + rotate))
+    if (crop) d.set('CropBox', crop)
     d.delete('B') // article beads point into the source's thread list
     out[slots[i]] = d
   })
@@ -507,7 +751,7 @@ export async function buildPdf(parts, level) {
   }
   drain() // first, so form fields reachable from the copied widgets are known
 
-  const docs = [...new Set(parts.map((p) => p.doc))]
+  const docs = [...new Set(parts.map((p) => p.doc).filter(Boolean))]
   const catalog = new Map([['Type', N('Catalog')], ['Pages', new Ref(2)]])
   const outline = docs.flatMap((doc) => readOutline(doc, st(doc).pages, (x) => copy(doc, x)))
   if (outline.length) {
@@ -524,8 +768,173 @@ export async function buildPdf(parts, level) {
   out[1] = catalog
   out[2] = new Map([['Type', N('Pages')], ['Kids', slots.map((n) => new Ref(n))], ['Count', slots.length]])
 
-  const saved = level ? await shrinkImages(out, level) : 0
-  return { bytes: writePdf(out), saved }
+  const pages = parts.map(({ doc, index, overlays, size, crop, text }, i) => {
+    const box = size ? [0, 0, ...size] : pageBox(doc, index)
+    return { slot: slots[i], dict: out[slots[i]], box, view: crop ?? box, rotate: out[slots[i]].get('Rotate'), overlays, text }
+  })
+  await decorate(out, alloc, pages, { numbers, watermark, flatten, textImage })
+  if (per) await impose(out, alloc, pages, per)
+  if (strip) stripHidden(out)
+  if (level) await optimize(out)
+  const saved = LEVELS[level] || gray ? await shrinkImages(out, LEVELS[level] ?? [Infinity, 0.85], gray) : 0
+  return { bytes: writePdf(out, encrypt ? await encryptAll(out, encrypt) : undefined), saved }
+}
+
+// ---- layout: several pages on one sheet ----
+
+const mul = (m, n) => [m[0] * n[0] + m[2] * n[1], m[1] * n[0] + m[3] * n[1], m[0] * n[2] + m[2] * n[3], m[1] * n[2] + m[3] * n[3], m[0] * n[4] + m[2] * n[5] + m[4], m[1] * n[4] + m[3] * n[5] + m[5]]
+function invert([a, b, c, d, e, f]) {
+  const k = a * d - b * c
+  return [d / k, -b / k, -c / k, a / k, (c * f - d * e) / k, (b * e - a * f) / k]
+}
+
+// A page as a Form XObject: its content streams joined into one, clipped to what shows.
+async function pageForm(out, page) {
+  const resolve = (v) => (v instanceof Ref ? out[v.num] : v)
+  const contents = resolve(page.dict.get('Contents'))
+  const list = (Array.isArray(contents) ? contents : [page.dict.get('Contents')]).map(resolve).filter((s) => s instanceof Stream)
+  const parts = []
+  for (const s of list) parts.push(await decode(s, resolve), Uint8Array.of(10))
+  const form = new Map([['Type', N('XObject')], ['Subtype', N('Form')], ['BBox', page.view], ['Resources', page.dict.get('Resources') ?? new Map()], ['Filter', N('FlateDecode')]])
+  if (page.dict.has('Group')) form.set('Group', page.dict.get('Group')) // transparency
+  return new Stream(form, await deflate(concat(parts)))
+}
+
+// per 2: two pages side by side on landscape A4 (wide pages: one above the other on portrait A4); per 4: two
+// by two on portrait A4; per 1: each page fitted to A4 in its own orientation. Pages keep the rotation they are shown with. Bookmarks move to the sheets;
+// links and form fields don't survive being drawn as pictures of pages.
+async function impose(out, alloc, pages, per) {
+  const [aw, ah] = A4, margin = per === 1 ? 0 : 18, gap = 12
+  const enc = new TextEncoder()
+  const kids = [], sheetOf = new Map()
+  for (let g = 0; g < pages.length; g += per) {
+    const group = pages.slice(g, g + per)
+    const [w0, h0] = displaySize(group[0].view, group[0].rotate), wide = w0 > h0
+    let sw = aw, sh = ah, cols = 2, rows = 2 // per 4
+    if (per === 2) [sw, sh, cols, rows] = wide ? [aw, ah, 1, 2] : [ah, aw, 2, 1] // wide pages stack
+    if (per === 1) [sw, sh, cols, rows] = wide ? [ah, aw, 1, 1] : [aw, ah, 1, 1]
+    const cw = (sw - 2 * margin - (cols - 1) * gap) / cols, ch = (sh - 2 * margin - (rows - 1) * gap) / rows
+    const sheet = alloc(), xobjects = new Map(), ops = []
+    for (const [k, page] of group.entries()) {
+      const cx = margin + (k % cols) * (cw + gap), cy = sh - margin - (Math.floor(k / cols) + 1) * ch - Math.floor(k / cols) * gap
+      const [w, h] = displaySize(page.view, page.rotate), s = Math.min(cw / w, ch / h)
+      // the page's own space -> as shown -> scaled into the middle of its cell
+      const m = mul([s, 0, 0, s, cx + (cw - w * s) / 2, cy + (ch - h * s) / 2], invert(displayMatrix(page.view, page.rotate)))
+      const n = alloc()
+      out[n] = await pageForm(out, page)
+      xobjects.set(`PTPg${k}`, new Ref(n))
+      ops.push(`q ${m.map(num).join(' ')} cm /PTPg${k} Do Q`)
+      sheetOf.set(page.slot, sheet)
+    }
+    const content = alloc()
+    out[content] = new Stream(new Map(), enc.encode(ops.join('\n')))
+    out[sheet] = new Map([['Type', N('Page')], ['Parent', new Ref(2)], ['MediaBox', [0, 0, sw, sh]],
+      ['Resources', new Map([['XObject', xobjects]])], ['Contents', new Ref(content)]])
+    kids.push(new Ref(sheet))
+  }
+  out[2] = new Map([['Type', N('Pages')], ['Kids', kids], ['Count', kids.length]])
+  for (const v of out) { // outline items: Title + Dest [page ...]
+    const dest = v instanceof Map && v.has('Title') ? v.get('Dest') : null
+    if (Array.isArray(dest) && dest[0] instanceof Ref && sheetOf.has(dest[0].num)) v.set('Dest', [new Ref(sheetOf.get(dest[0].num)), N('Fit')])
+  }
+  out[1].delete('AcroForm')
+  dropUnreachable(out) // the original page objects
+}
+
+// ---- lossless size savings ----
+
+// Streams stored without compression get Flate when that's smaller, and objects that came in twice
+// (the same font or logo from several merged files) are kept once.
+async function optimize(out) {
+  for (let n = 1; n < out.length; n++) {
+    const s = out[n]
+    if (!(s instanceof Stream) || s.dict.has('Filter') || s.dict.has('DecodeParms') || s.dict.get('Type') === N('Metadata') || s.data.length < 64) continue
+    const packed = await deflate(s.data)
+    if (packed.length < s.data.length) out[n] = new Stream(new Map([...s.dict, ['Filter', N('FlateDecode')]]), packed)
+  }
+  // pages, annotations (one page each), layers, fields and structure keep their identity even when equal
+  const unique = (v) => v instanceof Map && ([N('Page'), N('Pages'), N('Catalog'), N('Annot'), N('OCG'), N('StructElem')].includes(v.get('Type'))
+    || (v.has('Subtype') && v.has('Rect')) || v.has('FT') || v.has('Title'))
+  const fnv = (b) => { let h = 0x811c9dc5; for (const x of b) h = Math.imul(h ^ x, 0x01000193); return h >>> 0 }
+  for (let pass = 0; pass < 8; pass++) { // a font dict repeats only once its font file has been merged
+    const seen = new Map(), alias = new Map()
+    for (let n = 3; n < out.length; n++) {
+      const v = out[n]
+      if (v === null || unique(v)) continue
+      const key = v instanceof Stream ? `S${serialize(v.dict)}#${v.data.length}#${fnv(v.data)}` : `O${serialize(v)}`
+      const first = seen.get(key)
+      if (first === undefined) seen.set(key, n)
+      else if (!(v instanceof Stream) || out[first].data.every((b, i) => b === v.data[i])) alias.set(n, first)
+    }
+    if (!alias.size) break
+    const swap = (x) => {
+      if (x instanceof Ref) return alias.has(x.num) ? new Ref(alias.get(x.num)) : x
+      if (Array.isArray(x)) return x.map(swap)
+      if (x instanceof Map) return new Map([...x].map(([k, y]) => [k, swap(y)]))
+      return x
+    }
+    for (let n = 1; n < out.length; n++) {
+      const v = out[n]
+      out[n] = alias.has(n) ? null : v instanceof Stream ? new Stream(swap(v.dict), v.data) : swap(v)
+    }
+  }
+}
+
+// ---- security ----
+
+// What buildPdf already leaves out: the source's document info (title, author, producer) and catalog XMP.
+// This also drops XMP and app data inside pages and images, and the author names on comments.
+function stripHidden(out) {
+  const isAnnot = (d) => d.get('Type') === N('Annot') || (d.has('Subtype') && d.has('Rect'))
+  for (const v of out) {
+    const d = v instanceof Stream ? v.dict : v
+    if (!(d instanceof Map)) continue
+    for (const k of ['Metadata', 'PieceInfo', 'LastModified']) d.delete(k)
+    if (isAnnot(d) && d.get('Subtype') !== N('Widget')) d.delete('T') // a widget's T is its field name
+  }
+  dropUnreachable(out)
+}
+
+// objects nothing points at any more (the XMP streams above) are written as null
+function dropUnreachable(out) {
+  const seen = new Set([1])
+  const stack = [out[1]]
+  while (stack.length) {
+    const v = stack.pop()
+    if (v instanceof Ref) {
+      if (!seen.has(v.num)) {
+        seen.add(v.num)
+        stack.push(out[v.num])
+      }
+    } else if (Array.isArray(v)) stack.push(...v)
+    else if (v instanceof Map) stack.push(...v.values())
+    else if (v instanceof Stream) stack.push(v.dict)
+  }
+  for (let n = 1; n < out.length; n++) if (!seen.has(n)) out[n] = null
+}
+
+// encrypt: { password, ownerPassword?, print?, copy? }. Encrypts every string and stream in place
+// and returns the trailer entries that point at the new /Encrypt dictionary.
+async function encryptAll(out, { password, ...limits }) {
+  const { dict, encrypt } = await makeEncryption(password, limits)
+  const walk = async (x) => {
+    if (x instanceof Str) return new Str(await encrypt(x.bytes))
+    if (Array.isArray(x)) return Promise.all(x.map(walk))
+    if (x instanceof Map) return new Map(await Promise.all([...x].map(async ([k, y]) => [k, await walk(y)])))
+    return x
+  }
+  for (let n = 1; n < out.length; n++) {
+    const v = out[n]
+    out[n] = v instanceof Stream ? new Stream(await walk(v.dict), await encrypt(v.data)) : await walk(v)
+  }
+  const n = out.push(new Map([
+    ['Filter', N('Standard')], ['V', 5], ['R', 6], ['Length', 256],
+    ['CF', new Map([['StdCF', new Map([['AuthEvent', N('DocOpen')], ['CFM', N('AESV3')], ['Length', 32]])]])],
+    ['StmF', N('StdCF')], ['StrF', N('StdCF')], ['P', dict.P], ['EncryptMetadata', true],
+    ...['O', 'U', 'OE', 'UE', 'Perms'].map((k) => [k, new Str(dict[k])]),
+  ])) - 1
+  const id = new Str(globalThis.crypto.getRandomValues(new Uint8Array(16)))
+  return new Map([['Encrypt', new Ref(n)], ['ID', [id, id]]])
 }
 
 // ---- images ----
@@ -560,18 +969,9 @@ export async function imageToPdf(file) {
     // ponytail: photos are re-encoded once so the EXIF rotation sticks
     out[5] = new Stream(imageDict(w, h, 'DeviceRGB', 'DCTDecode'), await canvasJpeg(canvas, 0.92))
   } else { // PNG, GIF, WebP, BMP: lossless, alpha as a soft mask
-    const px = ctx.getImageData(0, 0, w, h).data
-    const rgb = new Uint8Array(w * h * 3), alpha = new Uint8Array(w * h)
-    let opaque = true
-    for (let i = 0; i < w * h; i++) {
-      rgb[i * 3] = px[i * 4]
-      rgb[i * 3 + 1] = px[i * 4 + 1]
-      rgb[i * 3 + 2] = px[i * 4 + 2]
-      alpha[i] = px[i * 4 + 3]
-      if (alpha[i] < 255) opaque = false
-    }
+    const { rgb, alpha } = splitRgba(ctx.getImageData(0, 0, w, h).data, w, h)
     out[5] = new Stream(imageDict(w, h, 'DeviceRGB', 'FlateDecode'), await deflate(rgb))
-    if (!opaque) {
+    if (alpha) {
       out[6] = new Stream(imageDict(w, h, 'DeviceGray', 'FlateDecode'), await deflate(alpha))
       out[5].dict.set('SMask', new Ref(6))
     }
@@ -587,6 +987,20 @@ export async function imageToPdf(file) {
   ])
   out[4] = new Stream(new Map(), new TextEncoder().encode(content))
   return writePdf(out)
+}
+
+// a one-page PDF that is a single JPEG filling a w x h point page, with the page's own /Rotate
+export function picturePage(jpeg, width, height, w, h, rotate = 0) {
+  return writePdf([null,
+    new Map([['Type', N('Catalog')], ['Pages', new Ref(2)]]),
+    new Map([['Type', N('Pages')], ['Kids', [new Ref(3)]], ['Count', 1]]),
+    new Map([
+      ['Type', N('Page')], ['Parent', new Ref(2)], ['MediaBox', [0, 0, w, h]], ['Rotate', rotate],
+      ['Resources', new Map([['XObject', new Map([['Im0', new Ref(5)]])]])], ['Contents', new Ref(4)],
+    ]),
+    new Stream(new Map(), new TextEncoder().encode(`q ${num(w)} 0 0 ${num(h)} 0 0 cm /Im0 Do Q`)),
+    new Stream(imageDict(width, height, 'DeviceRGB', 'DCTDecode'), jpeg),
+  ])
 }
 
 // [longest side in px, JPEG quality]. public/compress-guide.html explains these numbers: change both together.
@@ -640,14 +1054,16 @@ function stripExif(b) {
 
 // ponytail: capped by pixel size rather than effective DPI on the page; predictor-encoded,
 // CMYK and 1-bit images stay as they are. Add when users bring files that don't get smaller.
-// An image is only replaced when the JPEG comes out smaller, so flat diagrams keep their Flate.
-async function shrinkImages(objects, level) {
-  const [maxSide, quality] = LEVELS[level]
+// An image is only replaced when the JPEG comes out smaller, so flat diagrams keep their Flate,
+// unless gray asks for grayscale: then every image it can read is replaced.
+async function shrinkImages(objects, [maxSide, quality], gray) {
   const get = (v) => (v instanceof Ref ? objects[v.num] : v)
+  // soft masks must stay DeviceGray, and the canvas only writes RGB JPEGs
+  const masks = new Set(objects.map((o) => o instanceof Stream && o.dict.get('SMask')).filter((r) => r instanceof Ref).map((r) => r.num))
   let saved = 0
   for (let n = 1; n < objects.length; n++) {
     const s = objects[n]
-    const kind = s instanceof Stream && shrinkable(s.dict, get)
+    const kind = s instanceof Stream && !masks.has(n) && shrinkable(s.dict, get)
     if (!kind) continue
     try {
       const bmp = await createImageBitmap(kind.flate
@@ -655,10 +1071,16 @@ async function shrinkImages(objects, level) {
         : new Blob([stripExif(s.data)], { type: 'image/jpeg' }))
       const k = Math.min(1, maxSide / Math.max(bmp.width, bmp.height))
       const canvas = new OffscreenCanvas(Math.round(bmp.width * k), Math.round(bmp.height * k))
-      canvas.getContext('2d').drawImage(bmp, 0, 0, canvas.width, canvas.height)
+      const ctx = canvas.getContext('2d')
+      ctx.drawImage(bmp, 0, 0, canvas.width, canvas.height)
       bmp.close()
+      if (gray) {
+        const img = ctx.getImageData(0, 0, canvas.width, canvas.height), px = img.data
+        for (let i = 0; i < px.length; i += 4) px[i] = px[i + 1] = px[i + 2] = Math.round(px[i] * 0.299 + px[i + 1] * 0.587 + px[i + 2] * 0.114)
+        ctx.putImageData(img, 0, 0)
+      }
       const jpeg = await canvasJpeg(canvas, quality)
-      if (jpeg.length >= s.data.length) continue
+      if (!gray && jpeg.length >= s.data.length) continue
       const d = new Map([...s.dict, ...imageDict(canvas.width, canvas.height, 'DeviceRGB', 'DCTDecode')])
       d.delete('DecodeParms')
       objects[n] = new Stream(d, jpeg)

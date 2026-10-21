@@ -2,11 +2,23 @@
 
 사내용 PDF 페이지 편집기. 파일은 PC 밖으로 나가지 않고 브라우저 안에서 처리한다.
 
-- PDF·이미지를 여러 개 올려 썸네일로 보며 페이지를 고르고, 옮기고, 돌리고, 지운 뒤 저장 (Ctrl+Z 되돌리기)
-- 저장할 때 사진·스캔 이미지 용량 줄이기 (약/보통/강)
-- 비밀번호 PDF: 암호 없이 열리는 파일은 바로, 열기 암호가 있으면 물어본 뒤 처리. 결과는 암호 없이 저장
+- PDF·이미지를 여러 개 올려 썸네일로 보며 페이지를 고르고, 옮기고, 돌리고, 지우고, 빈 쪽을 넣은 뒤 저장 (Ctrl+Z 되돌리기)
+- 저장 방식: PDF 하나, 선택한 쪽만, 나누어 저장(한 쪽씩·몇 쪽씩·원래 파일별로, ZIP 하나), 이미지로 저장(JPG·PNG, ZIP)
+- 저장 옵션
+  - 용량 줄이기: 무손실(같은 글꼴·그림 하나로 합치기, 압축 안 된 내용 압축), 약/보통/강(사진·스캔 줄이기), 흑백으로
+  - 쪽 번호, 워터마크(글자·이미지)
+  - 보안: 열기 암호(AES-256), 인쇄·복사 막기, 숨은 정보 지우기, 양식 굳히기
+  - 배치: A4로 맞추기, 2쪽·4쪽 모아 찍기, 흰 여백 자르기
+  - 글자 인식(OCR): 글자가 없는 쪽(스캔본)을 한국어·영어로 읽어 검색·복사되는 보이지 않는 글자 층을 얹는다
+- 쪽 꾸미기(더블클릭): 도장·서명 이미지(흰 배경 투명하게), 글상자, 가림 상자. 가림 상자가 있는 쪽은 그림으로 바꿔 가린 내용을 파일에서 지운다
+- 두 파일 비교: 쪽마다 그림으로 겹쳐 추가(빨강)·삭제(파랑)·바뀜(주황) 표시
+- 비밀번호 PDF: 암호 없이 열리는 파일은 바로, 열기 암호가 있으면 물어본 뒤 처리. 결과는 암호 없이 저장 (암호 걸기를 고르지 않으면)
 - 북마크, 숨긴 레이어, 양식 입력값 유지
-- PDF 읽기·쓰기·복호화는 직접 구현 (`src/pdf.js`, `src/decrypt.js`). pdf.js는 썸네일 그리기에만 사용 (`src/thumbs.js`)
+- PDF 읽기·쓰기·암호·ZIP은 직접 구현 (`src/pdf.js`, `src/crypt.js`, `src/zip.js`). pdf.js는 쪽을 그림으로 그리는 데만 사용 (`src/render.js`: 썸네일, 꾸미기 창, 이미지로 저장, 비교, 가림, 여백 찾기)
+- 한글 글자(글상자, 워터마크, 외관 없는 양식 값)는 PC 글꼴로 그림을 만들어 넣는다 (`src/decor.js`). 쪽 번호는 PDF 글꼴(Helvetica)
+- OCR 엔진도 직접 구현 (`src/ocr/`). Tesseract 5.5.3의 LSTM 인식을 그대로 옮긴 것으로, 같은 그림이면 Tesseract와 같은 글자를 낸다(줄 단위 비교 40줄 중 32줄 일치, 나머지는 쉼표·마침표 같은 경합 자리). 쪽 나누기(기울기, 단, 줄 찾기)와 한국어·영어 합치기는 한국어 문서에 맞춰 새로 만들었다
+  - 데이터만 Tesseract 것을 쓴다: `public/ocr/*.traineddata.gz` = [tessdata_fast 4.1.0](https://github.com/tesseract-ocr/tessdata_fast) kor·eng를 gzip한 것 (Apache License 2.0, `public/ocr/LICENSE`)
+  - 인식은 worker에서 돌아 화면이 멈추지 않는다 (`src/ocr/worker.js`, `client.js`). 글자 층 글꼴은 글자 모양이 없는 TrueType을 직접 만든다 (`src/glyphless.js`)
 - 브라우저 호환: 썸네일은 pdf.js legacy 빌드라 iOS 16.4+/Chrome 97+ 에서 동작. 그보다 오래된 브라우저는 안내만 표시 (`public/check.js`)
 - 카카오톡 등 앱 안 브라우저에서는 저장이 막힐 수 있어 외부 브라우저로 열라는 안내 표시 (`src/inapp.js`)
 - 탭 이름은 브라우저 언어에 따라 바뀜 (한·영·일·중, 그 외 영어)
@@ -16,9 +28,12 @@ npm install
 npm run dev     # http://localhost:17020
 npm test        # 출력물을 pdf.js로 다시 읽어 검증
 npm run build   # dist/ 정적 파일
+npm run build:single   # 설치·인터넷 없이 더블클릭으로 여는 파일: dist/pdf-tools.html(2 MB), dist/pdf-tools-ocr.html(OCR 데이터 포함, 6 MB)
 ```
 
-배포: `main`에 push하면 GitHub Actions가 테스트 → 빌드 → GitHub Pages 배포 (`.github/workflows/pages.yml`).
+`pdf-tools.html`은 앱 전체(쪽 그리기용 pdf.js 포함)를 한 파일에 넣은 것이다. 웹 버전은 OCR 데이터를 처음 쓸 때 같은 사이트에서 받고, 가벼운 단일 파일에서는 OCR이 꺼진다. 파일로 열면(file://) 따로 떨어진 모듈 스크립트와 모듈 worker를 브라우저가 막기 때문에, 스크립트는 인라인으로, pdf.js worker는 일반(classic) worker로 다시 묶어 문서마다 하나씩 띄운다 (`vite.config.js`의 `single`, `src/render.js`).
+
+배포: `main`에 push하면 GitHub Actions가 테스트 → 빌드(웹 + 단일 파일 두 개) → GitHub Pages 배포 (`.github/workflows/pages.yml`). 단일 파일은 사이트의 `pdf-tools.html`, `pdf-tools-ocr.html` 주소에서 받는다.
 배포본에는 다른 주소로의 통신을 막는 CSP가 들어간다 (`vite.config.js`).
 
-지원하지 않는 것: 인증서 기반 암호, RC4·AES-128 파일의 한글 열기 암호, 같은 이름의 양식 필드를 가진 파일끼리 합칠 때 필드 분리.
+지원하지 않는 것: 인증서 기반 암호, RC4·AES-128 파일의 한글 열기 암호, 같은 이름의 양식 필드를 가진 파일끼리 합칠 때 필드 분리, 모아 찍은 쪽의 링크·양식 칸, 기존 글자 직접 고치기, Office·HWP ↔ PDF 변환, 세로쓰기·한자 OCR.

@@ -1,5 +1,5 @@
-// PDF Standard security handler, decryption only (ISO 32000-2 §7.6): RC4 40/128, AES-128, AES-256.
-// MD5 and RC4 are written here; SHA-2 and AES come from the browser's WebCrypto.
+// PDF Standard security handler (ISO 32000-2 §7.6): decrypts RC4 40/128, AES-128 and AES-256,
+// encrypts with AES-256 (R6) only. MD5 and RC4 are written here; SHA-2 and AES come from WebCrypto.
 
 export class PasswordError extends Error {
   constructor(wrong) {
@@ -124,13 +124,13 @@ function legacyKey(p, password) {
   return key
 }
 
-// Algorithm 2.B (R6; R5 is the plain SHA-256 that came before it)
-async function hash2B(pw, salt, R) {
-  let k = await sha('SHA-256', concat([pw, salt]))
+// Algorithm 2.B (R6; R5 is the plain SHA-256 that came before it). udata: the 48-byte U, for owner hashes
+async function hash2B(pw, salt, R, udata = new Uint8Array(0)) {
+  let k = await sha('SHA-256', concat([pw, salt, udata]))
   if (R === 5) return k
   let e = new Uint8Array(0)
   for (let i = 0; i < 64 || e.at(-1) > i - 32; i++) {
-    const block = concat([pw, k])
+    const block = concat([pw, k, udata])
     const k1 = new Uint8Array(block.length * 64)
     for (let j = 0; j < 64; j++) k1.set(block, j * block.length)
     e = await aesRaw('encrypt', k.subarray(0, 16), k.subarray(16, 32), k1)
@@ -161,4 +161,31 @@ export async function makeCipher(p, password) {
     return null
   }
   return { stream: make(p.stmf), string: make(p.strf) }
+}
+
+// Algorithms 8-10 (R6): a random file key, opened by the user password; the owner password lifts the
+// print/copy limits. Without one it is random, so nobody can lift them.
+// Returns { dict: the /Encrypt entries, encrypt: (bytes) => Promise<IV + AES-256-CBC ciphertext> }.
+export async function makeEncryption(userPassword, { ownerPassword, print = true, copy = true } = {}) {
+  const random = (n) => globalThis.crypto.getRandomValues(new Uint8Array(n))
+  const utf8 = (s) => new TextEncoder().encode(s).subarray(0, 127) // ponytail: no SASLprep; plain text passwords match
+  const key = random(32), zero = new Uint8Array(16)
+  const upw = utf8(userPassword), opw = ownerPassword ? utf8(ownerPassword) : random(32)
+  const [uSalt, ukSalt, oSalt, okSalt] = [random(8), random(8), random(8), random(8)]
+  const U = concat([await hash2B(upw, uSalt, 6), uSalt, ukSalt])
+  const UE = await aesRaw('encrypt', await hash2B(upw, ukSalt, 6), zero, key)
+  const O = concat([await hash2B(opw, oSalt, 6, U), oSalt, okSalt])
+  const OE = await aesRaw('encrypt', await hash2B(opw, okSalt, 6, U), zero, key)
+  let P = -4 // everything allowed; bits 1-2 must be 0
+  if (!print) P &= ~(1 << 2 | 1 << 11) // bits 3 and 12: print, print in high quality
+  if (!copy) P &= ~(1 << 4 | 1 << 9) // bits 5 and 10: copy, extract for accessibility
+  const perms = concat([new Uint8Array(4), Uint8Array.of(255, 255, 255, 255), new TextEncoder().encode('Tadb'), random(4)])
+  new DataView(perms.buffer).setInt32(0, P, true)
+  const Perms = await aesRaw('encrypt', key, zero, perms) // one block: CBC with a zero IV is ECB
+  const k = await aesKey(key)
+  const encrypt = async (data) => {
+    const iv = random(16)
+    return concat([iv, new Uint8Array(await subtle.encrypt({ name: 'AES-CBC', iv }, k, data))])
+  }
+  return { dict: { O, U, OE, UE, P, Perms }, encrypt }
 }

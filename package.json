@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "build:single": "vite build --mode single && vite build --mode single-ocr",
     "lint": "oxlint",
     "preview": "vite preview",
     "test": "node --test test/pdf.test.js"
