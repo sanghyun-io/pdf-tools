@@ -251,11 +251,12 @@ export default function App() {
                       className={thumb ? 'sheet has-thumb' : 'sheet'}
                       style={{ width: p.w * k, height: p.h * k, transform: `rotate(${p.base + p.rotate}deg)` }}
                     >
-                      {thumb ? <img src={thumb} alt="" draggable={false} /> : <span>{p.index + 1}</span>}
+                      {thumb && <img src={thumb} alt="" draggable={false} />}
                     </div>
                   </div>
-                  <div className="label" title={`${src.name} ${p.index + 1}쪽`}>
-                    <b>{i + 1}</b> {src.name} p.{p.index + 1}{turned ? ` · ${turned}°` : ''}
+                  <span className="badge" title={`${src.name}의 원래 ${p.index + 1}쪽`}>p.{p.index + 1}</span>
+                  <div className="label" title={src.name}>
+                    <b>{i + 1}</b> {src.name}{turned ? ` · ${turned}°` : ''}
                   </div>
                 </div>
               )
