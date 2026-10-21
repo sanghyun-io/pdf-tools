@@ -1,7 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
 import { readPdf, buildPdf, imageToPdf, pageInfo, moveItems, PasswordError } from './pdf.js'
 import { renderThumbs } from './thumbs.js'
+import { inAppBrowser } from './inapp.js'
 
+const IN_APP = inAppBrowser(navigator.userAgent, location.href)
+const GUIDE_URL = `${import.meta.env.BASE_URL}compress-guide.html`
 const HUES = [210, 20, 140, 280, 45, 330, 170, 100]
 const UNDO_LIMIT = 50
 const isPdf = (f) => f.type === 'application/pdf' || /\.pdf$/i.test(f.name)
@@ -14,18 +17,26 @@ function download(bytes, name) {
   setTimeout(() => URL.revokeObjectURL(url), 10_000)
 }
 
-// asks for the open password until it fits or the user cancels
-async function openPdf(bytes, name) {
+// asks for the open password until it fits or the user skips the file
+async function openPdf(bytes, name, askPassword) {
   for (let password = ''; ;) {
     try {
       return { doc: await readPdf(bytes, password), password }
     } catch (e) {
       if (!(e instanceof PasswordError)) throw e
-      const next = window.prompt(`${name}\n${e.wrong ? '암호가 틀렸습니다. 다시 입력하세요.' : '열기 암호를 입력하세요.'}`)
+      const next = await askPassword(name, e.wrong)
       if (next === null) throw new Error('암호를 입력하지 않아 건너뛰었습니다')
       password = next
     }
   }
+}
+
+// <dialog> opened as a modal as soon as it mounts; StrictMode may call this twice, hence the open check.
+// showModal() focuses the first focusable child (an iframe would swallow Esc), so focus [data-focus] after it.
+const showModal = (el) => {
+  if (!el || el.open) return
+  el.showModal()
+  el.querySelector('[data-focus]')?.focus()
 }
 
 export default function App() {
@@ -43,6 +54,16 @@ export default function App() {
   const [level, setLevel] = useState('')
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState(null)
+  // an in-page password form: in-app browsers may block window.prompt
+  const [ask, setAsk] = useState(null) // { name, wrong, resolve }
+  const [guide, setGuide] = useState(false) // compression guide in a dialog: a new tab may not open in-app
+  const [inAppNotice, setInAppNotice] = useState(!!IN_APP)
+
+  const askPassword = (name, wrong) => new Promise((resolve) => setAsk({ name, wrong, resolve }))
+  const answer = (value) => {
+    ask.resolve(value)
+    setAsk(null)
+  }
 
   const remember = () => setHistory((h) => [...h.slice(1 - UNDO_LIMIT), pages])
   const commit = (next) => {
@@ -65,7 +86,7 @@ export default function App() {
       try {
         if (!isPdf(file) && !file.type.startsWith('image/')) throw new Error('PDF나 이미지 파일이 아닙니다')
         const bytes = isPdf(file) ? new Uint8Array(await file.arrayBuffer()) : await imageToPdf(file)
-        const { doc, password } = await openPdf(bytes, file.name)
+        const { doc, password } = await openPdf(bytes, file.name, askPassword)
         const src = sources.current.push({ name: file.name, doc, hue: HUES[sources.current.length % HUES.length] }) - 1
         const added = doc.pages.map((_, index) => {
           const { w, h, rotate } = pageInfo(doc, index)
@@ -194,9 +215,22 @@ export default function App() {
         <p className="muted">
           파일은 이 PC 밖으로 나가지 않습니다. 모든 처리는 브라우저 안에서 합니다.
           {' · '}
-          <a href={`${import.meta.env.BASE_URL}compress-guide.html`} target="_blank" rel="noopener">압축 방식 알아보기</a>
+          <a href={GUIDE_URL} target="_blank" rel="noopener" onClick={(e) => { e.preventDefault(); setGuide(true) }}>
+            압축 방식 알아보기
+          </a>
         </p>
       </header>
+
+      {inAppNotice && (
+        <div className="notice">
+          <p>
+            <b>{IN_APP.app ?? '앱 안 브라우저'}에서 열렸습니다.</b> 여기서는 PDF 저장이 안 될 수 있어요.
+            {IN_APP.open ? ' 외부 브라우저로 열어 주세요.' : ' 화면 메뉴(⋯)에서 "Safari로 열기"를 눌러 주세요.'}
+          </p>
+          {IN_APP.open && <a className="button" href={IN_APP.open}>외부 브라우저로 열기</a>}
+          <button className="ghost" onClick={() => setInAppNotice(false)}>닫기</button>
+        </div>
+      )}
 
       {pages.length === 0 ? (
         <>
@@ -269,6 +303,28 @@ export default function App() {
 
       {busy && <p className="muted">처리 중…</p>}
       {message && <p className={message.error ? 'error' : 'ok'}>{message.text}</p>}
+
+      {ask && (
+        <dialog className="modal" ref={showModal} onClose={() => answer(null)}>
+          <form onSubmit={(e) => { e.preventDefault(); answer(e.currentTarget.password.value) }}>
+            <p><b>{ask.name}</b><br />{ask.wrong ? '암호가 틀렸습니다. 다시 입력하세요.' : '열기 암호를 입력하세요.'}</p>
+            <input name="password" type="password" autoComplete="off" data-focus />
+            <div className="actions">
+              <button type="button" onClick={() => answer(null)}>건너뛰기</button>
+              <button className="primary">열기</button>
+            </div>
+          </form>
+        </dialog>
+      )}
+      {guide && (
+        <dialog
+          className="modal guide" ref={showModal} onClose={() => setGuide(false)}
+          onClick={(e) => e.target === e.currentTarget && e.currentTarget.close()} // backdrop click
+        >
+          <iframe src={GUIDE_URL} title="압축 방식 알아보기" />
+          <form method="dialog"><button className="primary" data-focus>닫기</button></form>
+        </dialog>
+      )}
     </main>
   )
 }

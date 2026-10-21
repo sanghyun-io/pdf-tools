@@ -7,6 +7,7 @@ import { createHash } from 'node:crypto'
 import { getDocument } from 'pdfjs-dist/legacy/build/pdf.mjs'
 import { readPdf, buildPdf, pageInfo, moveItems, Ref, Str, PasswordError } from '../src/pdf.js'
 import { md5 } from '../src/decrypt.js'
+import { inAppBrowser } from '../src/inapp.js'
 
 const fixture = (name) => new Uint8Array(readFileSync(new URL(`fixtures/${name}`, import.meta.url)))
 const latin1 = (s) => Uint8Array.from(s, (c) => c.charCodeAt(0))
@@ -150,4 +151,27 @@ test('moveItems keeps selection order and lands at the insertion point', () => {
   assert.deepEqual(ids(moveItems(list, new Set([5, 2]), 0)), [2, 5, 1, 3, 4, 6])
   assert.deepEqual(ids(moveItems(list, new Set([1]), 6)), [2, 3, 4, 5, 6, 1])
   assert.deepEqual(ids(moveItems(list, new Set([3, 4]), 3)), [1, 2, 3, 4, 5, 6])
+})
+
+test('inAppBrowser tells embedded browsers from real ones', () => {
+  const href = 'https://example.github.io/pdf-tools/'
+  const ua = {
+    desktopChrome: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36',
+    androidChrome: 'Mozilla/5.0 (Linux; Android 14; SM-S921N) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Mobile Safari/537.36',
+    samsung: 'Mozilla/5.0 (Linux; Android 14; SM-S921N) AppleWebKit/537.36 (KHTML, like Gecko) SamsungBrowser/28.0 Chrome/130.0.0.0 Mobile Safari/537.36',
+    iosSafari: 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Mobile/15E148 Safari/604.1',
+    iosChrome: 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/147.0.0.0 Mobile/15E148 Safari/604.1',
+    androidKakao: 'Mozilla/5.0 (Linux; Android 14; SM-S921N Build/UP1A; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/140.0.0.0 Mobile Safari/537.36 KAKAOTALK 25.8.0',
+    iosKakao: 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 KAKAOTALK 25.8.0',
+    iosNaver: 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 Safari/605.1 NAVER(inapp; search; 2000; 12.0.0)',
+    androidWebView: 'Mozilla/5.0 (Linux; Android 14; Pixel 8 Build/AP2A; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/140.0.0.0 Mobile Safari/537.36',
+    iosWebView: 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148',
+  }
+  for (const k of ['desktopChrome', 'androidChrome', 'samsung', 'iosSafari', 'iosChrome']) assert.equal(inAppBrowser(ua[k], href), null, k)
+  const kakaoOpen = `kakaotalk://web/openExternal?url=${encodeURIComponent(href)}`
+  assert.deepEqual(inAppBrowser(ua.androidKakao, href), { app: '카카오톡', open: kakaoOpen })
+  assert.deepEqual(inAppBrowser(ua.iosKakao, href), { app: '카카오톡', open: kakaoOpen })
+  assert.deepEqual(inAppBrowser(ua.androidWebView, href), { app: null, open: 'intent://example.github.io/pdf-tools/#Intent;scheme=https;end' })
+  assert.deepEqual(inAppBrowser(ua.iosNaver, href), { app: null, open: null })
+  assert.deepEqual(inAppBrowser(ua.iosWebView, href), { app: null, open: null })
 })

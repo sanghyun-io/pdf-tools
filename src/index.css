@@ -72,6 +72,35 @@ button.ghost { border-color: transparent; background: none; color: var(--muted);
 .toolbar .count { min-width: 72px; font-size: 14px; font-weight: 600; }
 .toolbar .spacer { flex: 1; }
 header a { color: var(--accent); }
+
+.notice { /* in-app browser and unsupported-browser notices */
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  align-items: center;
+  margin-top: 16px;
+  padding: 12px 16px;
+  border: 1px solid #f59e0b;
+  border-radius: 10px;
+  background: #fffbeb;
+}
+.notice p { flex: 1 1 260px; margin: 0; }
+.notice .button { text-decoration: none; }
+
+.modal {
+  width: min(420px, calc(100vw - 32px));
+  padding: 20px;
+  border: none;
+  border-radius: 12px;
+  box-shadow: 0 10px 40px rgb(0 0 0 / 0.25);
+}
+.modal::backdrop { background: rgb(0 0 0 / 0.4); }
+.modal p { margin-top: 0; }
+.modal input { box-sizing: border-box; width: 100%; padding: 8px; font: inherit; border: 1px solid var(--line); border-radius: 6px; }
+.modal .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+.modal.guide[open] { display: flex; flex-direction: column; width: min(900px, calc(100vw - 32px)); height: 85vh; padding: 0; }
+.modal.guide iframe { flex: 1; width: 100%; border: 0; }
+.modal.guide form { padding: 8px 12px; text-align: right; }
 .help { margin: 0 0 12px; }
 
 .grid {

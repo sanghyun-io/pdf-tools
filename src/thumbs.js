@@ -1,6 +1,7 @@
 // Page thumbnails only: pdf.js draws each page once into a small image. Reading and writing PDFs stays in pdf.js (ours).
-import { getDocument, GlobalWorkerOptions } from 'pdfjs-dist'
-import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
+// legacy build: polyfills Promise.try & co., which iOS before 18.2 and older WebViews lack (+57 KB)
+import { getDocument, GlobalWorkerOptions } from 'pdfjs-dist/legacy/build/pdf.mjs'
+import workerUrl from 'pdfjs-dist/legacy/build/pdf.worker.min.mjs?url'
 
 GlobalWorkerOptions.workerSrc = workerUrl
 
