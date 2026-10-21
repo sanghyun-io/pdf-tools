@@ -191,7 +191,11 @@ export default function App() {
     <main onDragOver={(e) => e.preventDefault()} onDrop={onDrop}>
       <header>
         <h1>PDF 도구</h1>
-        <p className="muted">파일은 이 PC 밖으로 나가지 않습니다. 모든 처리는 브라우저 안에서 합니다.</p>
+        <p className="muted">
+          파일은 이 PC 밖으로 나가지 않습니다. 모든 처리는 브라우저 안에서 합니다.
+          {' · '}
+          <a href={`${import.meta.env.BASE_URL}compress-guide.html`} target="_blank" rel="noopener">압축 방식 알아보기</a>
+        </p>
       </header>
 
       {pages.length === 0 ? (
@@ -226,8 +230,6 @@ export default function App() {
           </div>
           <p className="muted help">
             클릭 선택 · Ctrl+클릭 추가/해제 · Shift+클릭 범위 · Ctrl+A 전체 · 끌어서 옮기기 · Delete 삭제 · Ctrl+Z 되돌리기 · Esc 선택 해제
-            {' · '}
-            <a href={`${import.meta.env.BASE_URL}compress-guide.html`} target="_blank" rel="noopener">압축 방식 알아보기</a>
           </p>
           <div className="grid" onClick={() => setSelected(new Set())}>
             {pages.map((p, i) => {

@@ -71,7 +71,7 @@ button.ghost { border-color: transparent; background: none; color: var(--muted);
 }
 .toolbar .count { min-width: 72px; font-size: 14px; font-weight: 600; }
 .toolbar .spacer { flex: 1; }
-.help a { color: var(--accent); }
+header a { color: var(--accent); }
 .help { margin: 0 0 12px; }
 
 .grid {
