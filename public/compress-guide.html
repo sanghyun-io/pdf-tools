@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>용량 줄이기 쉽게 보기</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #fff; --text: #1d2129; --muted: #6b7280; --line: #d9dde3;
+    --photo-a: #60a5fa; --photo-b: #2563eb; --keep: #16a34a; --cut: #dc2626; --soft: #e8efff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #111418; --card: #1b1f25; --text: #e6e8eb; --muted: #9aa3ad; --line: #353b44;
+      --photo-a: #3b82f6; --photo-b: #1d4ed8; --keep: #22c55e; --cut: #f87171; --soft: #1e2a44;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #111418; --card: #1b1f25; --text: #e6e8eb; --muted: #9aa3ad; --line: #353b44;
+    --photo-a: #3b82f6; --photo-b: #1d4ed8; --keep: #22c55e; --cut: #f87171; --soft: #1e2a44;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.5 system-ui, 'Malgun Gothic', sans-serif; }
+  main { max-width: 880px; margin: 0 auto; padding: 32px 16px 64px; }
+  h1 { font-size: 26px; margin: 0 0 4px; }
+  h2 { font-size: 20px; margin: 0 0 12px; }
+  .muted { color: var(--muted); }
+  section { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 20px; margin-top: 16px; }
+  svg { display: block; width: 100%; height: auto; }
+  svg text { fill: var(--text); font-family: inherit; }
+  .row { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; }
+  .level { text-align: center; }
+  .level b { display: block; font-size: 22px; }
+  .tag { display: inline-block; padding: 2px 10px; border-radius: 999px; background: var(--soft); font-size: 14px; }
+  .big { font-size: 18px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>용량 줄이기, 그림으로 보기</h1>
+  <p class="muted">PDF 도구의 "약 · 보통 · 강"이 실제로 하는 일</p>
+
+  <section>
+    <h2>① PDF 안에는 두 가지가 있어요</h2>
+    <svg viewBox="0 0 640 260" role="img" aria-label="페이지 안의 글자는 그대로 두고 사진만 줄인다">
+      <rect x="40" y="20" width="170" height="220" rx="6" fill="var(--card)" stroke="var(--line)" stroke-width="2"/>
+      <rect x="60" y="45" width="130" height="8" rx="4" fill="var(--line)"/>
+      <rect x="60" y="63" width="110" height="8" rx="4" fill="var(--line)"/>
+      <rect x="60" y="81" width="120" height="8" rx="4" fill="var(--line)"/>
+      <rect x="60" y="110" width="130" height="95" rx="4" fill="url(#sky)"/>
+      <polygon points="60,205 105,150 135,180 160,160 190,205" fill="var(--photo-b)" opacity=".8"/>
+      <circle cx="165" cy="130" r="9" fill="#fde68a"/>
+      <defs><linearGradient id="sky" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="var(--photo-a)"/><stop offset="1" stop-color="#93c5fd"/></linearGradient></defs>
+      <path d="M215 67 C 280 67, 290 60, 330 60" stroke="var(--keep)" stroke-width="3" fill="none"/>
+      <text x="340" y="55" font-size="22" font-weight="700" style="fill: var(--keep)">글자 · 도형</text>
+      <text x="340" y="82" font-size="18">그대로 둬요 (검색 · 복사 OK)</text>
+      <path d="M215 160 C 280 160, 290 170, 330 175" stroke="var(--cut)" stroke-width="3" fill="none"/>
+      <text x="340" y="172" font-size="22" font-weight="700" style="fill: var(--cut)">사진 · 스캔 이미지</text>
+      <text x="340" y="199" font-size="18">여기만 줄여요 (용량의 대부분)</text>
+    </svg>
+  </section>
+
+  <section>
+    <h2>② 손잡이는 두 개예요</h2>
+    <svg viewBox="0 0 640 185" role="img" aria-label="크기를 줄이고 화질을 낮춘다">
+      <text x="20" y="28" font-size="20" font-weight="700">크기 — 점(픽셀) 개수 줄이기</text>
+      <g transform="translate(20,45)">
+        <rect width="140" height="100" fill="url(#sky)"/>
+        <g stroke="var(--card)" stroke-width="1" opacity=".55">
+          <path d="M14 0V100M28 0V100M42 0V100M56 0V100M70 0V100M84 0V100M98 0V100M112 0V100M126 0V100M0 10H140M0 20H140M0 30H140M0 40H140M0 50H140M0 60H140M0 70H140M0 80H140M0 90H140"/>
+        </g>
+        <text x="70" y="125" font-size="15" text-anchor="middle">점이 많음</text>
+      </g>
+      <text x="185" y="100" font-size="30">→</text>
+      <g transform="translate(225,65)">
+        <rect width="84" height="60" fill="url(#sky)"/>
+        <g stroke="var(--card)" stroke-width="1" opacity=".55"><path d="M21 0V60M42 0V60M63 0V60M0 15H84M0 30H84M0 45H84"/></g>
+        <text x="42" y="85" font-size="15" text-anchor="middle">점이 적음</text>
+      </g>
+      <text x="340" y="28" font-size="20" font-weight="700">화질 — 꼼꼼함 낮추기</text>
+      <g transform="translate(340,45)">
+        <circle cx="50" cy="50" r="42" fill="var(--photo-a)"/>
+        <text x="50" y="125" font-size="15" text-anchor="middle">매끈</text>
+      </g>
+      <text x="455" y="100" font-size="30">→</text>
+      <g transform="translate(495,45)">
+        <path d="M30 8h40v12h12v12h12v36h-12v12h-12v12h-40v-12h-12v-12h-12v-36h12v-12h12z" fill="var(--photo-a)"/>
+        <text x="50" y="125" font-size="15" text-anchor="middle">살짝 뭉개짐</text>
+      </g>
+    </svg>
+  </section>
+
+  <section>
+    <h2>③ 세 단계는 손잡이를 얼마나 돌리느냐예요</h2>
+    <div class="row">
+      <div class="level">
+        <svg viewBox="0 0 200 150" role="img" aria-label="약: 가장 큰 사진">
+          <rect x="10" y="10" width="180" height="125" rx="4" fill="url(#sky)"/>
+        </svg>
+        <b>약</b>
+        <span class="tag">긴 변 최대 2600점 · 화질 80%</span>
+        <p class="muted">A4를 꽉 채운 사진 기준 약 220dpi<br>인쇄해도 무난</p>
+      </div>
+      <div class="level">
+        <svg viewBox="0 0 200 150" role="img" aria-label="보통: 중간 크기 사진">
+          <rect x="38" y="30" width="124" height="86" rx="4" fill="url(#sky)"/>
+        </svg>
+        <b>보통</b>
+        <span class="tag">긴 변 최대 1800점 · 화질 65%</span>
+        <p class="muted">약 150dpi<br>화면으로 보기 · 메일 첨부</p>
+      </div>
+      <div class="level">
+        <svg viewBox="0 0 200 150" role="img" aria-label="강: 가장 작은 사진">
+          <rect x="59" y="44" width="83" height="58" rx="4" fill="url(#sky)"/>
+        </svg>
+        <b>강</b>
+        <span class="tag">긴 변 최대 1200점 · 화질 50%</span>
+        <p class="muted">약 100dpi<br>가장 작게, 확대하면 뭉개짐</p>
+      </div>
+    </div>
+    <p class="muted">이미 그보다 작은 사진은 키우지 않아요. 화질만 다시 맞춰요.</p>
+  </section>
+
+  <section>
+    <h2>④ 작아질 때만 바꿔요</h2>
+    <svg viewBox="0 0 640 200" role="img" aria-label="다시 저장했더니 작아지면 교체, 커지면 원본 유지">
+      <g transform="translate(20,20)">
+        <rect width="110" height="80" rx="4" fill="url(#sky)"/>
+        <text x="55" y="105" font-size="15" text-anchor="middle">사진</text>
+        <text x="135" y="50" font-size="26">→</text>
+        <rect x="175" y="18" width="70" height="50" rx="4" fill="url(#sky)"/>
+        <text x="270" y="52" font-size="30" style="fill: var(--keep)">✓</text>
+        <text x="175" y="105" font-size="15">작아짐 → 바꿈</text>
+      </g>
+      <g transform="translate(340,20)">
+        <rect width="110" height="80" rx="4" fill="var(--card)" stroke="var(--line)" stroke-width="2"/>
+        <rect x="15" y="15" width="35" height="50" fill="var(--photo-b)"/>
+        <rect x="60" y="35" width="35" height="30" fill="var(--keep)"/>
+        <text x="55" y="105" font-size="15" text-anchor="middle">단색 도표</text>
+        <text x="135" y="50" font-size="26">→</text>
+        <text x="175" y="52" font-size="30" style="fill: var(--cut)">✗</text>
+        <text x="175" y="90" font-size="15">오히려 커짐</text>
+        <text x="175" y="110" font-size="15">→ 원본 그대로</text>
+      </g>
+      <text x="20" y="180" font-size="16" class="muted" style="fill: var(--muted)">그래서 줄이기를 켜도 파일이 커지는 일은 없어요.</text>
+    </svg>
+  </section>
+
+  <section>
+    <h2>⑤ 손대지 않는 그림도 있어요</h2>
+    <svg viewBox="0 0 640 140" role="img" aria-label="CMYK, 흑백 1비트, 특수 압축 이미지는 그대로 둔다">
+      <g transform="translate(60,15)">
+        <circle cx="25" cy="25" r="18" fill="#06b6d4" opacity=".8"/><circle cx="45" cy="25" r="18" fill="#ec4899" opacity=".8"/>
+        <circle cx="35" cy="42" r="18" fill="#eab308" opacity=".8"/>
+        <text x="35" y="90" font-size="15" text-anchor="middle">인쇄소용 색(CMYK)</text>
+      </g>
+      <g transform="translate(240,15)">
+        <rect x="10" y="5" width="60" height="60" fill="var(--card)" stroke="var(--line)" stroke-width="2"/>
+        <path d="M20 20h40M20 32h30M20 44h40" stroke="var(--text)" stroke-width="4"/>
+        <text x="40" y="90" font-size="15" text-anchor="middle">흑백 팩스식 스캔</text>
+      </g>
+      <g transform="translate(450,15)">
+        <rect x="10" y="5" width="60" height="60" rx="8" fill="var(--soft)" stroke="var(--line)" stroke-width="2"/>
+        <text x="40" y="45" font-size="26" text-anchor="middle">?</text>
+        <text x="40" y="90" font-size="15" text-anchor="middle">특수 압축 형식</text>
+      </g>
+      <text x="20" y="132" font-size="16" style="fill: var(--muted)">브라우저가 정확히 못 읽거나 이미 충분히 작아서, 건드리면 손해예요.</text>
+    </svg>
+  </section>
+
+  <section>
+    <h2>⑥ 실제로 해 보면</h2>
+    <p class="muted">예: 사진 4장이 든 PDF (4.5 MB)</p>
+    <svg viewBox="0 0 640 200" role="img" aria-label="안 함 4.5MB, 약 888KB, 보통 426KB, 강 177KB">
+      <g font-size="16">
+        <text x="0" y="30">안 함</text><rect x="70" y="14" width="540" height="24" rx="4" fill="var(--line)"/><text x="600" y="32" text-anchor="end">4.5 MB</text>
+        <text x="0" y="75">약</text><rect x="70" y="59" width="104" height="24" rx="4" fill="var(--photo-a)"/><text x="182" y="77">888 KB</text>
+        <text x="0" y="120">보통</text><rect x="70" y="104" width="50" height="24" rx="4" fill="var(--photo-b)"/><text x="128" y="122">426 KB</text>
+        <text x="0" y="165">강</text><rect x="70" y="149" width="21" height="24" rx="4" fill="var(--cut)"/><text x="99" y="167">177 KB</text>
+      </g>
+    </svg>
+    <p class="big">사진이 많은 파일일수록 많이 줄고, 글자만 있는 파일은 거의 그대로예요.</p>
+  </section>
+</main>
+</body>
+</html>
