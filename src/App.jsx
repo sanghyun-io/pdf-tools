@@ -89,6 +89,7 @@ export default function App() {
   const [editing, setEditing] = useState(null) // page id in the editor
   const [comparing, setComparing] = useState(null) // the files offered, fixed while the dialog is open
   const [inAppNotice, setInAppNotice] = useState(!!IN_APP)
+  const [install, setInstall] = useState(null) // Chrome and Edge's offer to install the page as an app (beforeinstallprompt)
 
   const option = (key, parse = String) => (e) => setOpts((o) => ({ ...o, [key]: parse(e.target.value) }))
   const flag = (key) => (e) => setOpts((o) => ({ ...o, [key]: e.target.checked }))
@@ -206,6 +207,26 @@ export default function App() {
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   })
+
+  // Chrome and Edge tell the page when it can be installed as an app (not once it is, nor opened from disk); the
+  // 앱으로 설치 button then opens their install dialog, as the icon in the address bar does
+  useEffect(() => {
+    const offer = (e) => {
+      e.preventDefault()
+      setInstall(e)
+    }
+    const installed = () => setInstall(null)
+    window.addEventListener('beforeinstallprompt', offer)
+    window.addEventListener('appinstalled', installed)
+    return () => {
+      window.removeEventListener('beforeinstallprompt', offer)
+      window.removeEventListener('appinstalled', installed)
+    }
+  }, [])
+  const installApp = async () => {
+    await install.prompt() // an offer works once; the browser makes a new one if it is turned down
+    setInstall(null)
+  }
 
   // OCR ticked: get its data ready while the user goes on, not when the first page is read
   useEffect(() => { if (opts.ocr) prepare() }, [opts.ocr])
@@ -508,7 +529,10 @@ export default function App() {
   return (
     <main onDragOver={(e) => e.preventDefault()} onDrop={onDrop}>
       <header>
-        <h1>PDF 도구</h1>
+        <div className="title">
+          <h1>PDF 도구</h1>
+          {install && <button onClick={installApp} title="이 PC에 앱으로 설치합니다. 설치하면 자기 창으로 열리고, 인터넷 없이도 씁니다">앱으로 설치</button>}
+        </div>
         <p className="muted">
           파일은 이 PC 밖으로 나가지 않습니다. 모든 처리는 브라우저 안에서 합니다.
           {' · '}
