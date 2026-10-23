@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { readPdf, buildPdf, imageToPdf, picturePage, pageInfo, pageBox, moveItems, PasswordError } from './pdf.js'
 import { renderThumbs, renderPages, openPages } from './render.js'
-import { OCR_AVAILABLE, recognize, textLayer } from './ocr/client.js'
+import { recognize, textLayer } from './ocr/client.js'
 import { imagePixels, textPixels, turnBox, steps } from './decor.js'
 import { zip } from './zip.js'
 import { inAppBrowser } from './inapp.js'
@@ -356,7 +356,7 @@ export default function App() {
     ocrPages.current = 0
     blackPages.current.clear()
     try {
-      const withText = opts.ocr && OCR_AVAILABLE && kind !== 'images'
+      const withText = opts.ocr && kind !== 'images'
       const parts = async (ps) => { // one at a time: rendering and OCR are heavy
         const out = []
         for (const p of ps) out.push(await partOf(p, withText))
@@ -440,7 +440,7 @@ export default function App() {
     opts.gray && '흑백',
     opts.impose && LAYOUTS[opts.impose],
     opts.autocrop && '흰 여백 자르기',
-    opts.ocr && OCR_AVAILABLE && '글자 인식',
+    opts.ocr && '글자 인식',
   ].filter(Boolean)
 
   return (
@@ -570,10 +570,10 @@ export default function App() {
                 <label className="check"><input type="checkbox" checked={opts.noCopy} onChange={flag('noCopy')} /> 복사 막기</label>
               </div>
               <div>글자 인식
-                <label className="check" title={OCR_AVAILABLE ? '스캔본처럼 글자 정보가 없는 쪽을 읽어, 검색·복사되는 보이지 않는 글자를 얹습니다 (한국어·영어)' : '이 파일에는 글자 인식 데이터가 없습니다'}>
-                  <input type="checkbox" checked={opts.ocr && OCR_AVAILABLE} disabled={!OCR_AVAILABLE} onChange={flag('ocr')} /> 스캔된 쪽의 글자 인식 (OCR)
+                <label className="check" title="스캔본처럼 글자 정보가 없는 쪽을 읽어, 검색·복사되는 보이지 않는 글자를 얹습니다 (한국어·영어)">
+                  <input type="checkbox" checked={opts.ocr} onChange={flag('ocr')} /> 스캔된 쪽의 글자 인식 (OCR)
                 </label>
-                <span className="muted">{OCR_AVAILABLE ? '글자가 없는 쪽만, 쪽마다 몇 초 걸립니다' : 'OCR 포함판(pdf-tools-ocr.html)에서만 됩니다'}</span>
+                <span className="muted">글자가 없는 쪽만, 쪽마다 몇 초 걸립니다</span>
               </div>
               <div>정리
                 <label className="check" title="작성 프로그램 기록, 쪽·이미지 안의 XMP 정보, 메모 작성자 이름. 제목·작성자 같은 문서 정보는 원래 옮기지 않습니다">

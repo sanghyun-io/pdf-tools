@@ -31,12 +31,12 @@ npm install
 npm run dev     # http://localhost:17020
 npm test        # 출력물을 pdf.js로 다시 읽어 검증
 npm run build   # dist/ 정적 파일
-npm run build:single   # 설치·인터넷 없이 더블클릭으로 여는 파일: dist/pdf-tools.html(2 MB), dist/pdf-tools-ocr.html(OCR 데이터 포함, 6 MB)
+npm run build:single   # 설치·인터넷 없이 더블클릭으로 여는 파일: dist/pdf-tools.html (6 MB, 그중 OCR 데이터 4 MB)
 ```
 
-`pdf-tools.html`은 앱 전체(쪽 그리기용 pdf.js 포함)를 한 파일에 넣은 것이다. 웹 버전은 OCR 데이터를 처음 쓸 때 같은 사이트에서 받고, 가벼운 단일 파일에서는 OCR이 꺼진다. 파일로 열면(file://) 따로 떨어진 모듈 스크립트와 모듈 worker를 브라우저가 막기 때문에, 스크립트는 인라인으로, pdf.js worker는 일반(classic) worker로 다시 묶어 문서마다 하나씩 띄운다 (`vite.config.js`의 `single`, `src/render.js`).
+`pdf-tools.html`은 앱 전체(쪽 그리기용 pdf.js, OCR 데이터 포함)를 한 파일에 넣은 것이다. 웹 버전은 OCR 데이터를 처음 쓸 때 같은 사이트에서 받는다. 파일로 열면(file://) 따로 떨어진 모듈 스크립트와 모듈 worker를 브라우저가 막기 때문에, 스크립트는 인라인으로, pdf.js worker는 일반(classic) worker로 다시 묶어 문서마다 하나씩 띄운다 (`vite.config.js`의 `single`, `src/render.js`).
 
-배포: `main`에 push하면 GitHub Actions가 테스트 → 빌드(웹 + 단일 파일 두 개) → GitHub Pages 배포 (`.github/workflows/pages.yml`). 단일 파일은 사이트의 `pdf-tools.html`, `pdf-tools-ocr.html` 주소에서 받는다.
+배포: `main`에 push하면 GitHub Actions가 테스트 → 빌드(웹 + 단일 파일) → GitHub Pages 배포 (`.github/workflows/pages.yml`). 단일 파일은 사이트의 `pdf-tools.html` 주소에서 받는다.
 배포본에는 다른 주소로의 통신을 막는 CSP가 들어간다 (`vite.config.js`).
 
 지원하지 않는 것: 인증서 기반 암호, RC4·AES-128 파일의 한글 열기 암호, 같은 이름의 양식 필드를 가진 파일끼리 합칠 때 필드 분리, 모아 찍은 쪽의 링크·양식 칸, 기존 글자 직접 고치기, Office·HWP ↔ PDF 변환, 세로쓰기·한자 OCR.

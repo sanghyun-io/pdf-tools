@@ -1,8 +1,6 @@
 // The app's side of OCR: gets the Korean and English data (fetched from the site, or built into the
-// single-file "OCR" edition), starts the worker once, and reads page pictures with it.
+// single file), starts the worker once, and reads page pictures with it.
 import { displayMatrix } from '../pdf.js'
-
-export const OCR_AVAILABLE = import.meta.env.MODE !== 'single' // the light single file has no data
 
 // recognizePage's lines (pixels of the straightened picture of the page drawn at `dpi`, turned `rot` as
 // shown) as buildPdf's text layer, in the page's own space: per line the baseline start, its direction and
@@ -44,7 +42,7 @@ async function gunzip(buffer) {
 }
 
 async function data() {
-  if (import.meta.env.MODE === 'single-ocr') {
+  if (import.meta.env.MODE === 'single') {
     // inlined as data: URLs; decoded by hand because the page's CSP doesn't let fetch() read data: URLs
     const urls = await Promise.all([import('../../public/ocr/kor.traineddata.gz?inline'), import('../../public/ocr/eng.traineddata.gz?inline')])
     return urls.map(({ default: url }) => Uint8Array.from(atob(url.slice(url.indexOf(',') + 1)), (c) => c.charCodeAt(0)).buffer)
@@ -57,8 +55,8 @@ async function data() {
 }
 
 async function newWorker() {
-  // the single-file editions are opened from disk, where only a classic worker from a blob starts
-  const { default: OcrWorker } = import.meta.env.MODE.startsWith('single')
+  // the single file is opened from disk, where only a classic worker from a blob starts
+  const { default: OcrWorker } = import.meta.env.MODE === 'single'
     ? await import('./worker.js?worker&inline')
     : await import('./worker.js?worker')
   return new OcrWorker()

@@ -24,9 +24,9 @@ const csp = {
   transformIndexHtml: (html) => html.replace('<head>', `<head>\n    <meta http-equiv="Content-Security-Policy" content="${WEB}" />`),
 }
 
-// `vite build --mode single` adds dist/pdf-tools.html: one file that works opened straight from disk, offline;
-// `--mode single-ocr` adds dist/pdf-tools-ocr.html, the same with the OCR data inside (about 4 MB more).
-// file:// refuses module scripts and workers loaded from other files, so everything goes inline.
+// `vite build --mode single` adds dist/pdf-tools.html: one file that works opened straight from disk, offline,
+// OCR data included (about 4 of its 6 MB). file:// refuses module scripts and workers loaded from other
+// files, so everything goes inline.
 const single = (fileName) => ({
   name: 'single',
   generateBundle: {
@@ -65,11 +65,11 @@ const single = (fileName) => ({
 
 // https://vite.dev/config/
 export default defineConfig(({ mode }) => {
-  const one = mode === 'single' ? 'pdf-tools.html' : mode === 'single-ocr' ? 'pdf-tools-ocr.html' : null
+  const one = mode === 'single' ? 'pdf-tools.html' : null
   return {
     base: './', // works under any sub-path, e.g. https://<user>.github.io/pdf-tools/
     plugins: [react(), csp, one && single(one)],
-    assetsInclude: ['**/*.traineddata.gz'], // the OCR data, inlined into pdf-tools-ocr.html (src/ocr/client.js)
+    assetsInclude: ['**/*.traineddata.gz'], // the OCR data, inlined into pdf-tools.html (src/ocr/client.js)
     server: { port: 17020, strictPort: true },
     // single files go next to the web build instead of replacing it
     ...(one && { publicDir: false, build: { emptyOutDir: false, rolldownOptions: { output: { codeSplitting: false } } } }),
