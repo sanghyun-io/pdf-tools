@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { readPdf, buildPdf, imageToPdf, picturePage, pageInfo, pageBox, moveItems, PasswordError } from './pdf.js'
 import { renderThumbs, renderPages, openPages } from './render.js'
-import { recognize, textLayer } from './ocr/client.js'
+import { prepare, recognize, textLayer } from './ocr/client.js'
 import { imagePixels, textPixels, turnBox, steps } from './decor.js'
 import { zip } from './zip.js'
 import { inAppBrowser } from './inapp.js'
@@ -194,6 +194,9 @@ export default function App() {
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   })
+
+  // OCR ticked: get its data ready while the user goes on, not when the first page is read
+  useEffect(() => { if (opts.ocr) prepare() }, [opts.ocr])
 
   function onDragStart(e, id) {
     const ids = selected.has(id) ? selected : new Set([id])

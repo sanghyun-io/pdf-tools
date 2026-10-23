@@ -77,6 +77,13 @@ function start() {
   return started
 }
 
+// Starts fetching the data and loading it in the worker now, while the user is still choosing options, so the
+// first page to read doesn't wait for the download (the data is otherwise asked for only when reading starts).
+// A failure here is retried, and reported, when reading.
+export function prepare() {
+  start().catch(() => {})
+}
+
 let nextId = 0
 // gray: Uint8Array w*h. onProgress(done, total) per line. Resolves to recognizePage's result.
 export async function recognize(gray, w, h, onProgress = () => {}) {
