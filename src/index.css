@@ -245,7 +245,14 @@ header a { color: var(--accent); }
 .editor .actions { display: flex; gap: 8px; align-items: center; justify-content: flex-end; margin: 0; }
 .editor .actions .muted { margin-right: auto; }
 .editor-tools .tools { display: flex; flex-wrap: wrap; gap: 4px; }
-.editor-tools .tools button, .signature .tabs button { padding: 6px 10px; }
+.signature .tabs button { padding: 6px 10px; }
+.editor-tools button.icon { display: grid; place-items: center; width: 36px; height: 34px; padding: 0; }
+.editor-tools .tool-name { min-width: 4em; font-size: 13px; color: var(--muted); } /* the chosen tool, for screens without hover */
+.editor .actions button { flex: none; white-space: nowrap; }
+@media (max-width: 600px) { /* the icons flow as one row that wraps, instead of a group wrapping on its own */
+  .editor-tools .tools { display: contents; }
+  .editor-tools button.icon { width: 32px; height: 32px; }
+}
 button[aria-pressed="true"] { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
 .editor-tools textarea.note-text { flex: 1 1 260px; }
 /* marks: drawn over the page picture; the highlighters darken it as ink would (multiply) */

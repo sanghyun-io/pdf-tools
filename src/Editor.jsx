@@ -22,6 +22,22 @@ const TOOLS = {
   arrow: ['화살표', '끌어서 긋습니다. 끝에 화살촉이 붙습니다'],
   note: ['메모', '누른 곳에 메모를 붙입니다. 다른 PDF 프로그램에서도 메모로 보입니다'],
 }
+// tool and undo icons, 24 x 24, drawn with the button's text color
+const icon = (body) => (
+  <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{body}</svg>
+)
+const ICONS = {
+  select: icon(<path d="M5 3l14 7.5-6.2 1.8L9.5 19z" />),
+  pen: icon(<><path d="M4 20h4L19 9l-4-4L4 16z" /><path d="M13.5 6.5l4 4" /></>),
+  highlight: icon(<><path d="M14 4l6 6-7.5 7.5H7.5v-5z" /><path d="M7.5 12.5l5 5" /><path d="M3 21h11" stroke="#eab308" strokeWidth="3" /></>),
+  square: icon(<rect x="4" y="5" width="16" height="14" rx="1" />),
+  circle: icon(<ellipse cx="12" cy="12" rx="8.5" ry="7" />),
+  line: icon(<path d="M5 19L19 5" />),
+  arrow: icon(<><path d="M5 19L19 5" /><path d="M10 5h9v9" /></>),
+  note: icon(<><path d="M4 4h16v12h-9l-5 4v-4H4z" /><path d="M8 8.5h8M8 12h5" /></>),
+  undo: icon(<><path d="M9 14L4 9l5-5" /><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11" /></>),
+  redo: icon(<><path d="M15 14l5-5-5-5" /><path d="M20 9H9.5a5.5 5.5 0 0 0 0 11H13" /></>),
+}
 const TEXT_MARKS = new Set(['highlight', 'underline', 'strikeout']) // made by picking text: they don't move
 const tint = (hex) => '#' + [1, 3, 5].map((i) => Math.round(255 - (255 - parseInt(hex.slice(i, i + 2), 16)) * 0.2).toString(16).padStart(2, '0')).join('')
 
@@ -404,14 +420,15 @@ export default function Editor({ page, source, onApply, onClose }) {
         <button disabled={active === null} onClick={remove}>선택한 것 지우기</button>
       </div>
       <div className="editor-tools">
-        <button disabled={!history.past.length} onClick={undo} title="Ctrl+Z">되돌리기</button>
-        <button disabled={!history.future.length} onClick={redo} title="Ctrl+Y">다시 하기</button>
+        <button className="icon" disabled={!history.past.length} onClick={undo} aria-label="되돌리기" title="되돌리기 (Ctrl+Z)">{ICONS.undo}</button>
+        <button className="icon" disabled={!history.future.length} onClick={redo} aria-label="다시 하기" title="다시 하기 (Ctrl+Y)">{ICONS.redo}</button>
         <span className="sep" />
         <div className="tools" role="group" aria-label="도구">
           {Object.entries(TOOLS).map(([k, [label, title]]) => (
-            <button key={k} aria-pressed={tool === k} onClick={() => chooseTool(k)} title={title}>{label}</button>
+            <button key={k} className="icon" aria-pressed={tool === k} onClick={() => chooseTool(k)} aria-label={label} title={`${label}: ${title}`}>{ICONS[k]}</button>
           ))}
         </div>
+        <span className="tool-name">{TOOLS[tool][0]}</span>
         {styled && styled !== 'select' && MARKS.has(styled === 'pen' ? 'ink' : styled) && (
           <>
             <span className="sep" />
