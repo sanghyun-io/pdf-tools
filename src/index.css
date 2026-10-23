@@ -308,7 +308,7 @@ button[aria-pressed="true"] { background: var(--accent-soft); border-color: var(
 }
 .editor .note-menu textarea { display: block; width: 100%; box-sizing: border-box; padding: 6px 8px; font: inherit; font-size: 14px; border: 1px solid var(--line); border-radius: 8px; resize: vertical; }
 .editor .note-menu .swatches { display: flex; align-items: center; gap: 6px; margin-top: 8px; font-size: 13px; }
-.editor .note-menu .spread { margin-top: 8px; font-size: 13px; }
+.editor .note-menu .spread { display: flex; align-items: center; gap: 6px; margin-top: 8px; font-size: 13px; }
 .editor .spread-note { position: absolute; inset: 0; box-sizing: border-box; border: 1px solid #404040; pointer-events: none; }
 .editor .text-menu .sep { width: 1px; height: 20px; background: var(--line); }
 /* pdf.js's text layer, from pdfjs-dist web/pdf_viewer.css (Apache-2.0): just what picking text needs */

@@ -758,8 +758,8 @@ function TextMenu({ picked, items, fit, lineColor, onMark }) {
   )
 }
 
-// Beside a selected note: what it says, its color (the current one pressed), and whether it is spread out as
-// a box showing its text (Chrome's PDF viewer can't show a note's Korean text). Opens on the side with room.
+// Beside a selected note: what it says, its color (the current one pressed), and whether it shows as an icon
+// or as a box with its text (Chrome's PDF viewer can't show a note's Korean text). Opens on the side with room.
 function NoteMenu({ note, fit, textRef, onFocus, onText, onColor, onSpread }) {
   const gap = 8, width = 250 // px
   const left = note.view.x * fit.width, right = (note.view.x + note.view.w) * fit.width
@@ -773,9 +773,11 @@ function NoteMenu({ note, fit, textRef, onFocus, onText, onColor, onSpread }) {
           <button key={c} className="swatch" style={{ background: c }} aria-pressed={note.color === c} aria-label={`메모 색 ${name}`} title={i ? name : `${name} (기본)`} onClick={() => onColor(c)} />
         ))}
       </div>
-      <label className="check spread" title="아이콘 대신 글이 보이는 상자로 저장합니다. 크롬 PDF 보기처럼 메모 내용을 띄우지 못하는 프로그램에서도 보입니다">
-        <input type="checkbox" checked={!!note.open} onChange={(e) => onSpread(e.target.checked)} /> 쪽에 펼쳐 보이기
-      </label>
+      <div className="spread" role="group" aria-label="표시 방식">
+        <span className="muted">표시 방식</span>
+        <button aria-pressed={!note.open} onClick={() => onSpread(false)} title="쪽에는 아이콘만, 누르면 내용이 뜹니다">아이콘</button>
+        <button aria-pressed={!!note.open} onClick={() => onSpread(true)} title="쪽에 내용이 적힌 상자로 보입니다. 크롬 PDF 보기처럼 메모 내용을 띄우지 못하는 프로그램에서도 보입니다">내용</button>
+      </div>
     </div>
   )
 }
