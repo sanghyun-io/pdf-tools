@@ -101,6 +101,13 @@ export async function renderPages(bytes, { password, pages, scale, rotation = nu
 
 const THUMB = 240 // longest side in px: twice the card's 120px box, sharp on HiDPI screens
 
+// a one-page PDF's thumbnail, unrotated (the card applies rotation), as a JPEG data URL
+export async function pageThumb(bytes) {
+  let url = null
+  await renderPages(bytes, { pages: [0], rotation: 0, scale: (w, h) => THUMB / Math.max(w, h) }, (_, canvas) => { url = canvas.toDataURL('image/jpeg', 0.8) })
+  return url
+}
+
 // thumbnails unrotated (the card applies rotation) as JPEG data URLs
 export async function renderThumbs(bytes, password, onThumb) {
   try {

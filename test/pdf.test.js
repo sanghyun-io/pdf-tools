@@ -14,6 +14,7 @@ import { recognizeLine } from '../src/ocr/recognize.js'
 import { recognizePage } from '../src/ocr/page.js'
 import { inAppBrowser } from '../src/inapp.js'
 import { turnMark, layoutText, layoutTable } from '../src/decor.js'
+import { readFont } from '../src/ttf.js'
 
 const fixture = (name) => new Uint8Array(readFileSync(new URL(`fixtures/${name}`, import.meta.url)))
 const latin1 = (s) => Uint8Array.from(s, (c) => c.charCodeAt(0))
@@ -356,6 +357,39 @@ test('a text box picture carries its words as invisible text where they show, tu
   for (const [x, y, str] of found) {
     near([x, y], [0.2 + 10 / 594.96, 0.3 + 20 / 841.92], 'baseline start')
     assert.equal(str, '검색되는 글자') // a reader joins the words with a space
+  }
+})
+
+test('a PC font goes in as a subset: real text a reader finds where it was put, in the embedded glyphs', async () => {
+  const file = new Uint8Array(readFileSync(new URL('../node_modules/pdfjs-dist/standard_fonts/LiberationSans-Regular.ttf', import.meta.url)))
+  const font = readFont(file, 'LiberationSans')
+  const gids = [...'Hello'].map((c) => font.gid(c.codePointAt(0)))
+  assert.ok(gids.every((g) => g > 0), `${gids}`)
+  const subset = font.subset(gids)
+  assert.ok(subset.length < file.length / 4, `subset ${subset.length} of ${file.length} bytes`)
+  // what a FontBook (fonts.js) hands decorate for this face
+  const used = new Map(gids.map((g, i) => [g, 'Hello'[i]]))
+  const fonts = { data: () => ({ name: font.name, file: subset, used, width: font.advance, ascent: font.ascent, descent: font.descent, capHeight: font.capHeight, bbox: font.bbox, italicAngle: font.italicAngle }) }
+  const doc = await readPdf(fixture('chrome.pdf'))
+  const drawing = { kind: 'vector', x: 0.1, y: 0.5, w: 0.5, h: 0.1, rot: 0, draw: [
+    { text: gids, font: 'liberation', size: 20, color: '#1d4ed8', x: 0, y: 20 },
+    { fill: '#e8efff', x: 0, y: 30, w: 50, h: 5 },
+    { stroke: '#000000', width: 1, segments: [[0, 40, 100, 40]] },
+  ] }
+  const { bytes } = await buildPdf([{ doc, index: 0, rotate: 0, overlays: [drawing] }, { doc, index: 1, rotate: 90, overlays: [drawing] }], { fonts })
+  const raw = new TextDecoder('latin1').decode(bytes)
+  assert.equal(raw.match(/\/FontFile2/g)?.length, 1, 'the face goes in once for both pages')
+  const found = await eachPage(bytes, async (page) => {
+    const vp = page.getViewport({ scale: 1, rotation: 0 })
+    const item = (await page.getTextContent()).items.find((t) => t.str === 'Hello')
+    const [x, y] = apply(vp.transform, item.transform[4], item.transform[5])
+    const ops = await page.getOperatorList()
+    const loaded = ops.argsArray[ops.fnArray.indexOf(OPS.setFont)][0]
+    return { at: [x / vp.width, y / vp.height], missing: page.commonObjs.get(loaded).missingFile }
+  })
+  for (const { at, missing } of found) {
+    near(at, [0.1, 0.5 + 20 / 841.92], 'baseline start')
+    assert.equal(missing, false, 'drawn with the embedded glyphs')
   }
 })
 

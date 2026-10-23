@@ -45,6 +45,12 @@ export function glyphlessFont() {
     name: new Uint8Array([...be([0, names.length, 6 + 12 * names.length, ...nameRecords]), ...names.flatMap(({ s }) => [...s])]),
     post: be([3, 0, 0, 0, -100, 50, ...u32(0), ...u32(0), ...u32(0), ...u32(0), ...u32(0)]),
   }
+  return sfnt(tables)
+}
+
+// A TrueType file from its tables { tag: bytes }: the table directory, each table padded to 4 bytes with
+// its checksum, and head.checkSumAdjustment set.
+export function sfnt(tables) {
   const tags = Object.keys(tables).sort()
   const dir = new DataView(new ArrayBuffer(12 + 16 * tags.length))
   dir.setUint32(0, 0x00010000)

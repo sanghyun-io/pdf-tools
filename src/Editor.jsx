@@ -1,7 +1,8 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { openPages } from './render.js'
-import { imagePixels, textPixels, turnedUrl, turnMark, steps, PX_PER_PT, SIGN_FONT, TEXT_FONT, layoutText, layoutTable, HEADER_FILL } from './decor.js'
+import { imagePixels, textPixels, turnedUrl, turnMark, steps, PX_PER_PT, SIGN_FONT, TEXT_FONT, layoutText, layoutTable, HEADER_FILL, cellText, cellImage } from './decor.js'
 import { MARKS } from './pdf.js'
+import { DEFAULT_FONT, commonFonts, localFonts, canAskFonts, fontLabel } from './fonts.js'
 import Signature from './Signature.jsx'
 
 const VIEW = 1100 // px, longest side of the page picture
@@ -91,7 +92,9 @@ export default function Editor({ page, source, onApply, onClose, at = 0, total =
   const [history, setHistory] = useState({ past: [], future: [] }) // earlier and undone `items`
   const [active, setActive] = useState(null)
   const [tool, setTool] = useState('select')
-  const [style, setStyleState] = useState({ color: '#000000', marker: '#fde047', width: 2, fill: false, size: 12, bold: false, align: 'left', lineHeight: 1.4, border: 1, header: true })
+  const [style, setStyleState] = useState({ color: '#000000', marker: '#fde047', width: 2, fill: false, size: 12, bold: false, align: 'left', lineHeight: 1.4, border: 1, header: true, font: DEFAULT_FONT })
+  const [fontList, setFontList] = useState(commonFonts) // the PC's fonts we know of: common ones, or all once allowed
+  const [allFonts, setAllFonts] = useState(false)
   const [writing, setWriting] = useState(null) // the text box or table cell being typed in: { id, cell: [row, col] }
   const [draft, setDraft] = useState(null) // the stroke or shape being drawn: { tool, pts: [x, y, ...] } in page fractions
   const [picked, setPicked] = useState(null) // text picked with the select tool, line boxes: offers the text menu
@@ -126,6 +129,21 @@ export default function Editor({ page, source, onApply, onClose, at = 0, total =
     })).then((list) => live && setItems(list))
     return () => { live = false }
   }, [page, source, rot, W, H])
+
+  // every PC font, without asking, when the browser was allowed to show them before
+  useEffect(() => {
+    localFonts(false).then((list) => {
+      if (!list) return
+      setFontList(list)
+      setAllFonts(true)
+    })
+  }, [])
+  async function askFonts() {
+    const list = await localFonts(true)
+    if (!list) return setError('PC 글꼴 목록을 볼 수 없습니다. 허용하지 않았거나 이 브라우저(크롬·엣지에서 됨)가 지원하지 않습니다.')
+    setFontList(list)
+    setAllFonts(true)
+  }
 
   // the largest paper with the page's shape that fits the stage
   useLayoutEffect(() => {
@@ -238,8 +256,8 @@ export default function Editor({ page, source, onApply, onClose, at = 0, total =
     if (!it) return
     const only = (keys) => Object.fromEntries(Object.entries(fields).filter(([k]) => keys.includes(k)))
     let f = {}
-    if (it.kind === 'textbox') f = only(['size', 'bold', 'color', 'align', 'lineHeight'])
-    else if (it.kind === 'table') f = only(['size', 'color', 'border', 'header'])
+    if (it.kind === 'textbox') f = only(['font', 'size', 'bold', 'color', 'align', 'lineHeight'])
+    else if (it.kind === 'table') f = only(['font', 'size', 'color', 'border', 'header'])
     else if (MARKS.has(it.kind)) {
       const marker = it.kind === 'highlight' || it.kind === 'note' || it.marker
       if (fields.color && !marker) f.color = fields.color
@@ -259,12 +277,48 @@ export default function Editor({ page, source, onApply, onClose, at = 0, total =
     let rows = t.rows.map((row) => [...row]), widths = t.widths
     if (op === 'row+') rows.splice(r + 1, 0, widths.map(() => ''))
     else if (op === 'row-' && rows.length > 1) rows.splice(r, 1)
-    else if (op === 'col+') { rows = rows.map((row) => [...row.slice(0, c + 1), '', ...row.slice(c + 1)]); widths = equalWidths(widths.length + 1) }
-    else if (op === 'col-' && widths.length > 1) { rows = rows.map((row) => row.filter((_, k) => k !== c)); widths = equalWidths(widths.length - 1) }
-    else return
+    else if (op === 'col+') { // the column splits in two
+      rows = rows.map((row) => [...row.slice(0, c + 1), '', ...row.slice(c + 1)])
+      widths = [...widths.slice(0, c), widths[c] / 2, widths[c] / 2, ...widths.slice(c + 1)]
+    } else if (op === 'col-' && widths.length > 1) { // its width goes to the column beside it
+      rows = rows.map((row) => row.filter((_, k) => k !== c))
+      const to = c > 0 ? c - 1 : 1
+      widths = widths.map((w, k) => (k === to ? w + widths[c] : w)).filter((_, k) => k !== c)
+    } else return
     remember()
     if (writing?.id === t.id) setWriting(null)
     update(t.id, { rows, widths })
+  }
+
+  // the cell being typed in becomes value (text, or { image }): one step
+  function setCell(value) {
+    const t = items.find((it) => it.id === writing.id), [r, c] = writing.cell
+    remember()
+    update(t.id, { rows: t.rows.map((row, k) => (k === r ? row.map((v, j) => (j === c ? value : v)) : row)) })
+    typing.current = false
+  }
+
+  // A table's column edge dragged: the two columns beside it trade width. Pointer moves are taken along the
+  // table's own x axis, which points another way once the page has turned.
+  function dragColumn(e, it, c) {
+    e.preventDefault()
+    e.stopPropagation()
+    const n = turnOf(it), sx = e.clientX, sy = e.clientY, from = it.widths
+    const inner = (own(it).w - it.border) * ppt, MIN = 0.04
+    let moved = false
+    const move = (ev) => {
+      if (!moved) remember()
+      moved = true
+      const d = [ev.clientX - sx, ev.clientY - sy, sx - ev.clientX, sy - ev.clientY][n] / inner
+      const pair = from[c] + from[c + 1], left = Math.min(Math.max(from[c] + d, MIN), pair - MIN)
+      update(it.id, { widths: from.map((w, k) => (k === c ? left : k === c + 1 ? pair - left : w)) })
+    }
+    const up = () => {
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', up)
+    }
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', up)
   }
 
   function drag(e, id, mode) {
@@ -343,8 +397,8 @@ export default function Editor({ page, source, onApply, onClose, at = 0, total =
       const w = tiny ? (t === 'text' ? 0.4 : 0.6) : Math.max(0.05, Math.abs(x1 - x0))
       const view = { x: Math.min(tiny ? x0 : Math.min(x0, x1), 1 - w), y: Math.min(y0, y1), w, h: 0.02 }
       const id = t === 'text'
-        ? put({ kind: 'textbox', view, text: '', size: style.size, bold: style.bold, color: style.color, align: style.align, lineHeight: style.lineHeight })
-        : put({ kind: 'table', view, rows: [['', '', ''], ['', '', ''], ['', '', '']], widths: equalWidths(3), size: Math.min(style.size, 11), color: style.color, header: style.header, border: style.border, borderColor: '#000000' })
+        ? put({ kind: 'textbox', view, text: '', font: style.font, size: style.size, bold: style.bold, color: style.color, align: style.align, lineHeight: style.lineHeight })
+        : put({ kind: 'table', view, rows: [['', '', ''], ['', '', ''], ['', '', '']], widths: equalWidths(3), font: style.font, size: Math.min(style.size, 11), color: style.color, header: style.header, border: style.border, borderColor: '#000000' })
       setTool('select')
       write(id, t === 'table' ? [0, 0] : null)
       return
@@ -519,6 +573,15 @@ export default function Editor({ page, source, onApply, onClose, at = 0, total =
         {(textStyle || tableStyle) && (
           <>
             <span className="sep" />
+            <select
+              value={look.font ?? DEFAULT_FONT} aria-label="글꼴" className="font-pick"
+              title={allFonts ? 'PC에 설치된 글꼴. 저장하면 쓴 글자만 담아 글꼴을 PDF에 넣어, 다른 프로그램에서도 진짜 글자로 보이고 고칠 수 있습니다'
+                : 'PC에 흔히 있는 글꼴. "PC 글꼴 모두 불러오기"를 허용하면 모든 글꼴을 고를 수 있고, 저장할 때 진짜 글자로 들어갑니다'}
+              onChange={(e) => (e.target.value === '*all' ? askFonts() : setStyle({ font: e.target.value }))}
+            >
+              {[...new Set([look.font ?? DEFAULT_FONT, ...fontList])].map((f) => <option key={f} value={f} style={{ fontFamily: `"${f}"` }}>{fontLabel(f)}</option>)}
+              {canAskFonts && !allFonts && <option value="*all">PC 글꼴 모두 불러오기…</option>}
+            </select>
             <select value={look.size} onChange={(e) => setStyle({ size: Number(e.target.value) })} aria-label="글자 크기">
               {TEXT_SIZES.map((s) => <option key={s} value={s}>{s}pt</option>)}
             </select>
@@ -550,6 +613,21 @@ export default function Editor({ page, source, onApply, onClose, at = 0, total =
                 <button onClick={() => tableChange('row-')} disabled={activeItem.rows.length < 2} title="고른 칸의 행 빼기">행 −</button>
                 <button onClick={() => tableChange('col+')} title="고른 칸 오른쪽에 열 넣기">열 +</button>
                 <button onClick={() => tableChange('col-')} disabled={activeItem.widths.length < 2} title="고른 칸의 열 빼기">열 −</button>
+                {writing?.id === activeItem.id && writing.cell && (
+                  cellImage(activeItem.rows[writing.cell[0]][writing.cell[1]]) ? (
+                    <button onClick={() => setCell('')} title="고른 칸의 그림을 빼고 빈 칸으로">그림 빼기</button>
+                  ) : (
+                    <label className="button" title="고른 칸에 그림을 넣습니다. 칸 폭에 맞춰 비율대로 들어갑니다">
+                      <input type="file" hidden accept="image/*" onChange={async (e) => {
+                        const file = e.target.files[0]
+                        e.target.value = ''
+                        if (!file) return
+                        try { setCell({ image: await imagePixels(file) }) } catch (err) { setError(err.message) }
+                      }} />
+                      칸에 그림
+                    </label>
+                  )
+                )}
               </span>
             )}
           </>
@@ -587,6 +665,7 @@ export default function Editor({ page, source, onApply, onClose, at = 0, total =
                         it={it} width={own(it).w} ppt={ppt} cell={writing?.id === it.id ? writing.cell : null}
                         onCell={(r, c, text) => type(it.id, { rows: it.rows.map((row, k) => (k === r ? row.map((s, j) => (j === c ? text : s)) : row)) })}
                         onGo={(cell) => (cell ? write(it.id, cell) : setWriting(null))}
+                        onColumn={it.id === active ? (e, c) => dragColumn(e, it, c) : null}
                       />
                     )}
                   </Turned>
@@ -691,7 +770,7 @@ function Turned({ n, w, h, children }) {
   return <div className="turned" style={{ width: w, height: h, transform: turn }}>{children}</div>
 }
 
-const fontCss = (o, lineH, ppt, bold = o.bold) => ({ fontFamily: TEXT_FONT, fontSize: o.size * ppt, fontWeight: bold ? 'bold' : 'normal', color: o.color, lineHeight: `${lineH * ppt}px` })
+const fontCss = (o, lineH, ppt, bold = o.bold) => ({ fontFamily: `"${o.font ?? DEFAULT_FONT}", ${TEXT_FONT}`, fontSize: o.size * ppt, fontWeight: bold ? 'bold' : 'normal', color: o.color, lineHeight: `${lineH * ppt}px` })
 const caretAtEnd = (e) => e.target.setSelectionRange(e.target.value.length, e.target.value.length)
 
 // A text box (width pt): its lines as they will be saved (decor.js layoutText), or a text area while typed in.
@@ -712,8 +791,9 @@ function TextBoxView({ it, width, ppt, writing, onText, onDone }) {
 }
 
 // A table (width pt, border included) as it will be saved (decor.js layoutTable): header fill, grid, cell
-// text. A double-clicked cell is typed in; Tab goes to the next cell, Shift+Tab back, Escape stops.
-function TableView({ it, width, ppt, cell, onCell, onGo }) {
+// text. A double-clicked cell is typed in; Tab goes to the next cell, Shift+Tab back, Escape stops. While
+// the table is selected (onColumn), its inner column edges can be dragged.
+function TableView({ it, width, ppt, cell, onCell, onGo, onColumn }) {
   const layout = useMemo(() => layoutTable(it, width - it.border), [it, width])
   const k = ppt, o = it.border / 2, inner = width - it.border, cols = it.widths.length
   const grid = [...layout.cols.map((c) => c.x), inner].map((x) => `M${(o + x) * k} ${o * k}V${(o + layout.height) * k}`)
@@ -736,9 +816,11 @@ function TableView({ it, width, ppt, cell, onCell, onGo }) {
             key={`${r}:${c}`} className="cell" style={{ left: (o + col.x) * k, top: (o + row.y) * k, width: col.w * k, height: row.h * k }}
             onDoubleClick={(e) => { e.stopPropagation(); onGo([r, c]) }}
           >
-            {here ? (
+            {lay.image ? (
+              <img src={lay.image.url} alt="" draggable={false} className={here ? 'cell-image chosen' : 'cell-image'} style={{ left: pad, top: pad, width: lay.width * k, height: lay.height * k }} />
+            ) : here ? (
               <textarea
-                className="box-text" autoFocus onFocus={caretAtEnd} value={it.rows[r][c]}
+                className="box-text" autoFocus onFocus={caretAtEnd} value={cellText(it.rows[r][c])}
                 style={{ ...font, left: pad, top: pad, width: col.w * k - 2 * pad, height: row.h * k - 2 * pad + lay.lineH * k }}
                 onPointerDown={(e) => e.stopPropagation()} onChange={(e) => onCell(r, c, e.target.value)}
                 onKeyDown={(e) => {
@@ -750,6 +832,12 @@ function TableView({ it, width, ppt, cell, onCell, onGo }) {
           </div>
         )
       }))}
+      {onColumn && layout.cols.slice(1).map((col, i) => (
+        <span
+          key={i} className="col-edge" style={{ left: (o + col.x) * k, height: (layout.height + it.border) * k }}
+          onPointerDown={(e) => onColumn(e, i)} title="끌어서 칸 폭 바꾸기"
+        />
+      ))}
     </>
   )
 }

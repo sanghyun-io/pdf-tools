@@ -1,6 +1,7 @@
 // Images and text turned into pixels for decorate() in pdf.js: stamps, signatures, text boxes, watermarks.
 // Text is drawn into a picture with the PC's own fonts, so Korean works without shipping a font file.
 import { splitRgba } from './pdf.js'
+import { DEFAULT_FONT } from './fonts.js'
 
 export const PX_PER_PT = 4 // text pictures at about 290 dpi: sharp in print
 
@@ -21,6 +22,16 @@ export function turnMark(o, n) {
     if (o.rects) o.rects = o.rects.map(([u, v, w, h]) => [1 - v - h, u, h, w])
   }
   return o
+}
+
+// pixels back on a canvas, to draw them into another picture
+function asCanvas({ width, height, rgb, alpha }) {
+  const canvas = new OffscreenCanvas(width, height), data = new ImageData(width, height)
+  for (let i = 0; i < width * height; i++) {
+    data.data.set([rgb[i * 3], rgb[i * 3 + 1], rgb[i * 3 + 2], alpha ? alpha[i] : 255], i * 4)
+  }
+  canvas.getContext('2d').putImageData(data, 0, 0)
+  return canvas
 }
 
 async function pixels(canvas) {
@@ -95,13 +106,14 @@ export function canvasMeasure(font) {
   ctx.font = font
   return (s) => ctx.measureText(s).width
 }
-const fontOf = ({ size, bold }, family = FONT) => `${bold ? 'bold ' : ''}${size}px ${family}`
+// a CSS font: the box's own font first (o.font, a family name), then the usual Korean ones
+const fontOf = ({ size, bold, font }) => `${bold ? 'bold ' : ''}${size}px ${font ? `"${font}", ` : ''}${FONT}`
 
 // Wraps text to `width` pt as pdfme does (src/text/wrap.ts, MIT, read with REA): each paragraph is filled
 // piece by piece; a piece that fits on a full line moves to the next one, a longer one fills what is left
 // and is cut between characters. Returns lines { text, x, width } (x from the alignment) and the height.
 // measure(s) -> pt (canvasMeasure, or a stand-in for tests).
-export function layoutText(text, { size = 12, lineHeight = 1.4, align = 'left', width, bold = false }, measure = canvasMeasure(fontOf({ size, bold }))) {
+export function layoutText(text, { size = 12, lineHeight = 1.4, align = 'left', width, bold = false, font }, measure = canvasMeasure(fontOf({ size, bold, font }))) {
   const lines = []
   const push = (s) => {
     const t = s.replace(/\s+$/, ''), w = measure(t)
@@ -124,6 +136,9 @@ export function layoutText(text, { size = 12, lineHeight = 1.4, align = 'left', 
 }
 
 const PAD = 0.45 // a table cell's padding, in its font size
+// a table cell holds text, or { image } (pixels, as imagePixels gives) shown across its width
+export const cellText = (v) => (typeof v === 'string' ? v : '')
+export const cellImage = (v) => (v && typeof v === 'object' ? v.image : null)
 export const tableFonts = (t) => {
   const plain = canvasMeasure(fontOf(t)), bold = canvasMeasure(fontOf({ ...t, bold: true }))
   return (isBold) => (isBold ? bold : plain)
@@ -137,7 +152,11 @@ export function layoutTable(t, width, fonts = tableFonts(t)) {
   let y = 0
   const rows = t.rows.map((row, r) => {
     const bold = !!t.header && r === 0
-    const cells = row.map((s, c) => layoutText(s, { size: t.size, lineHeight: 1.3, width: Math.max(1, cols[c].w - 2 * pad), bold }, fonts(bold)))
+    const cells = row.map((v, c) => {
+      const width = Math.max(1, cols[c].w - 2 * pad), image = cellImage(v)
+      return image ? { lines: [], lineH: t.size * 1.3, height: (width * image.height) / image.width, image, width }
+        : layoutText(cellText(v), { size: t.size, lineHeight: 1.3, width, bold }, fonts(bold))
+    })
     const out = { y, h: Math.max(...cells.map((l) => l.height)) + 2 * pad, cells, bold }
     y += out.h
     return out
@@ -183,6 +202,7 @@ export async function tablePixels(t, width) {
   for (const row of layout.rows) {
     row.cells.forEach((cell, c) => {
       const x = layout.cols[c].x + layout.pad, y = row.y + layout.pad
+      if (cell.image) ctx.drawImage(asCanvas(cell.image), x * k, y * k, cell.width * k, cell.height * k)
       Object.assign(ctx, { font: fontOf({ size: t.size * k, bold: row.bold }), fillStyle: t.color, textBaseline: 'middle' })
       cell.lines.forEach((l, i) => ctx.fillText(l.text, (x + l.x) * k, (y + (i + 0.5) * cell.lineH) * k))
       runs.push(...textRuns(cell, t.size, x + bw / 2, y + bw / 2, fonts(row.bold)))
@@ -198,6 +218,50 @@ export async function tablePixels(t, width) {
   return { image: await pixels(canvas), height: layout.height + bw, width: width + bw, runs }
 }
 export const HEADER_FILL = '#e8efff'
+
+// A text box or table as drawing steps for decorate in pdf.js ({ kind: 'vector', draw, height }): its text
+// real, in the PC font's own glyphs (book: a FontBook, fonts.js), its grid as lines. null when a font can't
+// be embedded or lacks one of the characters; the box is then saved as its picture.
+export async function boxDrawing(o, width, book) {
+  const family = o.font ?? DEFAULT_FONT
+  // the baseline below a line's middle, where CSS puts it: half of ascent + descent
+  const below = (face, size) => (size * (face.font.ascent + face.font.descent)) / 2000
+  const lines = (layout, face, size, color, x0, y0) => {
+    const out = []
+    for (const [i, l] of layout.lines.entries()) {
+      if (!l.text.trim()) continue
+      const text = book.glyphs(face, l.text)
+      if (!text) return null
+      out.push({ text, font: face.key, size, color, bold: face.synthetic, x: x0 + l.x, y: y0 + (i + 0.5) * layout.lineH + below(face, size) })
+    }
+    return out
+  }
+  if (o.kind === 'textbox') {
+    const face = await book.face(family, o.bold)
+    const layout = layoutText(o.text, { ...o, width })
+    const draw = face && lines(layout, face, o.size, o.color, 0, 0)
+    return draw && { kind: 'vector', draw, height: layout.height }
+  }
+  const bw = o.border, inner = width - bw, off = bw / 2, layout = layoutTable(o, inner)
+  const plain = await book.face(family, false), bold = o.header ? await book.face(family, true) : plain
+  if (!plain || !bold) return null
+  const draw = []
+  if (o.header && layout.rows[0]) draw.push({ fill: HEADER_FILL, x: off, y: off, w: inner, h: layout.rows[0].h })
+  for (const row of layout.rows) {
+    for (const [c, cell] of row.cells.entries()) {
+      const x = off + layout.cols[c].x + layout.pad, y = off + row.y + layout.pad
+      if (cell.image) draw.push({ image: cell.image, x, y, w: cell.width, h: cell.height })
+      const text = lines(cell, row.bold ? bold : plain, o.size, o.color, x, y)
+      if (!text) return null
+      draw.push(...text)
+    }
+  }
+  if (bw > 0) {
+    const xs = [...layout.cols.map((col) => col.x), inner], ys = [...layout.rows.map((row) => row.y), layout.height]
+    draw.push({ stroke: o.borderColor, width: bw, segments: [...xs.map((x) => [off + x, off, off + x, off + layout.height]), ...ys.map((y) => [off, off + y, off + inner, off + y])] })
+  }
+  return { kind: 'vector', draw, height: layout.height + bw }
+}
 
 // a preview picture turned clockwise, for stamps placed before their page was rotated
 export async function turnedUrl(url, deg) {

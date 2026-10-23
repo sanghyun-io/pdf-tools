@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
 import { readPdf, buildPdf, imageToPdf, picturePage, pageInfo, pageBox, moveItems, PasswordError } from './pdf.js'
-import { renderThumbs, renderPages, openPages } from './render.js'
+import { renderThumbs, renderPages, openPages, pageThumb } from './render.js'
 import { prepare, recognize, textLayer } from './ocr/client.js'
-import { imagePixels, textPixels, turnBox, steps, textBoxPixels, tablePixels } from './decor.js'
+import { imagePixels, textPixels, turnBox, steps, textBoxPixels, tablePixels, boxDrawing } from './decor.js'
+import { FontBook, localFonts } from './fonts.js'
 import { zip } from './zip.js'
 import { inAppBrowser } from './inapp.js'
 import Editor from './Editor.jsx'
@@ -69,6 +70,7 @@ export default function App() {
   const [pages, setPages] = useState([]) // { id, src, index, rotate, w, h, base, overlays? } or { id, blank, w, h, ... }
   const [history, setHistory] = useState([]) // earlier `pages` arrays, for undo
   const [thumbs, setThumbs] = useState({}) // "src:index" -> image URL
+  const [looks, setLooks] = useState({}) // page id -> { overlays, url }: its card's picture with what it's decorated with
   const [selected, setSelected] = useState(new Set())
   const [anchor, setAnchor] = useState(null)
   const [dropAt, setDropAt] = useState(null)
@@ -206,6 +208,26 @@ export default function App() {
   // OCR ticked: get its data ready while the user goes on, not when the first page is read
   useEffect(() => { if (opts.ocr) prepare() }, [opts.ocr])
 
+  // A decorated page's card shows it as it will be saved: the page with its decorations made into a one-page
+  // PDF and drawn small, one page at a time, again when its decorations change.
+  useEffect(() => {
+    const todo = pages.filter((p) => p.overlays?.length && looks[p.id]?.overlays !== p.overlays)
+    if (!todo.length) return
+    let live = true
+    ;(async () => {
+      for (const p of todo) {
+        try {
+          const url = await pageThumb((await buildPdf([await previewPart(p)])).bytes)
+          if (live) setLooks((l) => ({ ...l, [p.id]: { overlays: p.overlays, url } }))
+        } catch (e) {
+          console.warn('decorated thumbnail', e) // the card keeps the plain picture
+        }
+        if (!live) return
+      }
+    })()
+    return () => { live = false }
+  }, [pages]) // eslint-disable-line react-hooks/exhaustive-deps
+
   function onDragStart(e, id) {
     const ids = selected.has(id) ? selected : new Set([id])
     if (!selected.has(id)) {
@@ -282,20 +304,29 @@ export default function App() {
     return crop
   }
 
-  // Text boxes and tables go to buildPdf as their pictures, with their words for the invisible text (decor.js);
-  // the picture's height is the laid-out one.
-  async function withPictures(p) {
+  // Text boxes and tables go to buildPdf drawn for real, their text in the PC font embedded, when the browser
+  // lets us read font files (book: a FontBook); else as their pictures, with their words for the invisible
+  // text (decor.js). Either way the box is as tall as laid out.
+  async function withPictures(p, book = null) {
     return Promise.all((p.overlays ?? []).map(async (o) => {
       if (o.kind !== 'textbox' && o.kind !== 'table') return o
       const [W, H] = o.rot % 180 ? [p.h, p.w] : [p.w, p.h] // the page as shown when the box was placed
+      const real = book && await boxDrawing(o, o.w * W, book)
+      if (real) return { ...real, x: o.x, y: o.y, w: o.w, h: real.height / H, rot: o.rot }
       const { image, height, runs } = o.kind === 'textbox' ? await textBoxPixels(o, o.w * W) : await tablePixels(o, o.w * W - o.border)
       return { image, runs, x: o.x, y: o.y, w: o.w, h: height / H, rot: o.rot }
     }))
   }
 
+  // a page and its decorations for its card: redaction boxes shown as black boxes rather than burned in
+  async function previewPart(p) {
+    const overlays = (await withPictures(p)).map((o) => (o.kind === 'redact' ? { ...o, kind: 'square', color: '#000000', fill: '#000000', width: 0 } : o))
+    return p.blank ? { size: [p.w, p.h], rotate: p.rotate, overlays } : { doc: sources.current[p.src].doc, index: p.index, rotate: p.rotate, overlays }
+  }
+
   // what buildPdf gets for each page; withText adds an OCR text layer to pages that have no text
-  async function partOf(p, withText) {
-    const overlays = (await withPictures(p)).filter((o) => o.kind !== 'redact')
+  async function partOf(p, withText, book) {
+    const overlays = (await withPictures(p, book)).filter((o) => o.kind !== 'redact')
     if (p.blank) return { size: [p.w, p.h], rotate: p.rotate, overlays }
     const src = sources.current[p.src]
     const crop = opts.autocrop ? await whiteCrop(p) : null
@@ -380,9 +411,11 @@ export default function App() {
     blackPages.current.clear()
     try {
       const withText = opts.ocr && kind !== 'images'
+      // text boxes and tables as real text, when the browser lets us read the PC's font files
+      const book = (await localFonts(false)) ? new FontBook() : null
       const parts = async (ps) => { // one at a time: rendering and OCR are heavy
         const out = []
-        for (const p of ps) out.push(await partOf(p, withText))
+        for (const p of ps) out.push(await partOf(p, withText, book))
         return out
       }
       const read = () => (ocrPages.current ? `, 글자 인식 ${ocrPages.current}쪽` : withText ? ', 글자를 인식할 쪽(스캔본)이 없었습니다' : '')
@@ -391,7 +424,7 @@ export default function App() {
         return p ? stem(sources.current[p.src].name) : 'blank'
       }
       const base = nameOf(list)
-      const decor = await decorations()
+      const decor = { ...(await decorations()), fonts: book }
       const after = locked ? ', 암호 걸림' : ''
       // shown as a warning: the file is saved, but a black page is almost never what the user meant
       const done = (text) => {
@@ -639,7 +672,7 @@ export default function App() {
           <div className="grid" onClick={() => setSelected(new Set())}>
             {pages.map((p, i) => {
               const src = sources.current[p.src]
-              const thumb = thumbs[`${p.src}:${p.index}`]
+              const thumb = (p.overlays?.length && looks[p.id]?.url) || thumbs[`${p.src}:${p.index}`]
               const turned = ((p.rotate % 360) + 360) % 360
               const k = 100 / Math.max(p.w, p.h)
               const cls = ['page',

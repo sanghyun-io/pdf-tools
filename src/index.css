@@ -260,6 +260,10 @@ header a { color: var(--accent); }
 .editor .box-line { position: absolute; white-space: pre; pointer-events: none; }
 .editor .cell { position: absolute; box-sizing: border-box; }
 .editor .table-grid { position: absolute; left: 0; top: 0; overflow: visible; pointer-events: none; }
+.editor .col-edge { position: absolute; top: 0; width: 10px; margin-left: -5px; cursor: col-resize; z-index: 1; }
+.editor .cell-image { position: absolute; display: block; pointer-events: none; }
+.editor .cell-image.chosen { outline: 2px solid var(--accent); }
+.editor .col-edge:hover { background: rgb(37 99 235 / 0.3); }
 .editor .box-text {
   position: absolute; left: 0; top: 0; width: 100%; box-sizing: border-box; margin: 0; padding: 0; border: none; resize: none; overflow: hidden;
   background: rgb(255 255 255 / 0.7); outline: 2px solid var(--accent); white-space: pre-wrap; word-break: keep-all; overflow-wrap: anywhere;

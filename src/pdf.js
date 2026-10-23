@@ -499,6 +499,8 @@ function decodeText(b) {
 // fractions of the page as shown turned by `rot` (origin top-left), so a stamp turns with its page later.
 // An overlay may carry runs (a text box or table drawn as its picture): its lines as { x, y (baseline), size,
 // words } in points from the box's top-left, put in as invisible text the same way as part.text.
+// { kind: 'vector', draw } is a text box or table drawn for real (boxDrawing in decor.js), with the faces of
+// fonts (a FontBook, fonts.js) embedded once for the whole file.
 // part.text: invisible text (OCR) in the page's own space, by line: [{ x, y, ux, uy, size, words: [{ text,
 // at, width }] }]. A line's baseline starts at (x, y) and runs along (ux, uy); each word starts `at` points
 // along it and spans `width`; glyphs are `size` tall. One text matrix per line, words moved along it, so
@@ -508,7 +510,7 @@ function decodeText(b) {
 // field without an appearance stream, or any text field when NeedAppearances says the stored ones may be
 // stale, is drawn with textImage(value) -> pixels when given (the browser draws Korean); without textImage
 // the stored appearance is used, if any.
-async function decorate(out, alloc, pages, { numbers, watermark, flatten, textImage }) {
+async function decorate(out, alloc, pages, { numbers, watermark, flatten, textImage, fonts: book }) {
   const enc = new TextEncoder()
   const stale = out[1].get('AcroForm')?.get('NeedAppearances') === true
   const images = new Map() // pixels -> Ref: a stamp used on many pages is stored once
@@ -528,6 +530,11 @@ async function decorate(out, alloc, pages, { numbers, watermark, flatten, textIm
   let open = null // one shared "q" stream: the original content runs inside q ... Q
   let ocrFont = null
   const textFont = async () => (ocrFont ??= await glyphlessFontObjects(out, alloc))
+  const embedded = new Map() // FontBook key -> [resource name, Ref]: each face embedded once for the whole file
+  const fontRef = async (key) => {
+    if (!embedded.has(key)) embedded.set(key, [`PTF${embedded.size}`, await embedFont(out, alloc, await book.data(key), embedded.size)])
+    return embedded.get(key)
+  }
 
   for (const [i, { slot, dict, box, view = box, rotate, overlays = [], text }] of pages.entries()) {
     const ops = [], xobjects = new Map(), fonts = new Map()
@@ -576,6 +583,27 @@ async function decorate(out, alloc, pages, { numbers, watermark, flatten, textIm
       await place(watermark.image, rotate, (W - width * s) / 2, (H - height * s) / 2, width * s, height * s, view)
     }
     for (const o of overlays) {
+      if (o.kind === 'vector') { // a text box or table drawn: real text in an embedded font, lines, fills, pictures
+        const [W, H] = displaySize(box, o.rot), X = o.x * W, T = (1 - o.y) * H
+        const p = (x, y) => `${num(X + x)} ${num(T - y)}` // points from the box's top-left, y down -> as shown
+        const body = []
+        for (const d of o.draw) {
+          if (d.fill) body.push(`${paint(d.fill, 'rg')} ${p(d.x, d.y + d.h)} ${num(d.w)} ${num(d.h)} re f`)
+          else if (d.stroke) body.push(`${num(d.width)} w ${paint(d.stroke, 'RG')} ${d.segments.map(([a, b, c, e]) => `${p(a, b)} m ${p(c, e)} l`).join(' ')} S`)
+          else if (d.image) {
+            const name = `PTIm${xobjects.size}`
+            xobjects.set(name, await imageRef(d.image))
+            body.push(`q ${num(d.w)} 0 0 ${num(d.h)} ${p(d.x, d.y + d.h)} cm /${name} Do Q`)
+          } else if (d.text) {
+            const [name, ref] = await fontRef(d.font)
+            fonts.set(name, ref)
+            const bolder = d.bold ? ` 2 Tr ${num(d.size * 0.03)} w ${paint(d.color, 'RG')}` : '' // no bold face: filled and outlined
+            body.push(`q BT /${name} ${num(d.size)} Tf ${paint(d.color, 'rg')}${bolder} ${p(d.x, d.y)} Td <${d.text.map((g) => g.toString(16).padStart(4, '0')).join('')}> Tj ET Q`)
+          }
+        }
+        at(o.rot, body.join('\n'))
+        continue
+      }
       if (!o.image) continue // redaction boxes: App burns those into a picture of the page
       const [W, H] = displaySize(box, o.rot)
       await place(o.image, o.rot, o.x * W, (1 - o.y - o.h) * H, o.w * W, o.h * H)
@@ -608,6 +636,48 @@ async function decorate(out, alloc, pages, { numbers, watermark, flatten, textIm
     dict.set('Contents', [new Ref(open), ...list, new Ref(decor)])
   }
   if (flatten) out[1].delete('AcroForm')
+}
+
+// A PC font's subset as a Type0 font over a CIDFontType2 (ISO 32000-2 §9.7, §9.9): codes are glyph ids
+// (Identity-H, CIDToGIDMap /Identity), the widths of the glyphs used, and a ToUnicode map so the text can be
+// found, copied and edited. f: FontBook.data in fonts.js.
+async function embedFont(out, alloc, f, serial) {
+  const enc = new TextEncoder()
+  const stream = async (dict, data) => {
+    const n = alloc()
+    out[n] = new Stream(new Map([...dict, ['Filter', N('FlateDecode')]]), await deflate(data))
+    return new Ref(n)
+  }
+  const hex4 = (n) => n.toString(16).padStart(4, '0').toUpperCase()
+  const gids = [...f.used.keys()].sort((a, b) => a - b)
+  const map = []
+  for (let i = 0; i < gids.length; i += 100) { // at most 100 entries per block
+    const part = gids.slice(i, i + 100)
+    map.push(`${part.length} beginbfchar`, ...part.map((g) => `<${hex4(g)}> <${Array.from({ length: f.used.get(g).length }, (_, k) => hex4(f.used.get(g).charCodeAt(k))).join('')}>`), 'endbfchar')
+  }
+  const cmap = ['/CIDInit /ProcSet findresource begin', '12 dict begin', 'begincmap',
+    '/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def', '/CMapName /Adobe-Identity-UCS def', '/CMapType 2 def',
+    '1 begincodespacerange', '<0000> <FFFF>', 'endcodespacerange', ...map, 'endcmap', 'CMapName currentdict /CMap defineresource pop', 'end', 'end'].join('\n')
+  // a subset's name starts with six capital letters of its own
+  const name = N(`${Array.from({ length: 6 }, (_, k) => String.fromCharCode(65 + ((serial * 7 + k * 3) % 26))).join('')}+${f.name}`)
+  const descriptor = alloc()
+  out[descriptor] = new Map([
+    ['Type', N('FontDescriptor')], ['FontName', name], ['Flags', 4], ['FontBBox', f.bbox.map(Math.round)], ['ItalicAngle', f.italicAngle],
+    ['Ascent', Math.round(f.ascent)], ['Descent', Math.round(f.descent)], ['CapHeight', Math.round(f.capHeight)], ['StemV', 80],
+    ['FontFile2', await stream(new Map([['Length1', f.file.length]]), f.file)],
+  ])
+  const cid = alloc()
+  out[cid] = new Map([
+    ['Type', N('Font')], ['Subtype', N('CIDFontType2')], ['BaseFont', name],
+    ['CIDSystemInfo', new Map([['Registry', new Str(enc.encode('Adobe'))], ['Ordering', new Str(enc.encode('Identity'))], ['Supplement', 0]])],
+    ['FontDescriptor', new Ref(descriptor)], ['DW', 1000], ['W', gids.flatMap((g) => [g, [Math.round(f.width(g))]])], ['CIDToGIDMap', N('Identity')],
+  ])
+  const font = alloc()
+  out[font] = new Map([
+    ['Type', N('Font')], ['Subtype', N('Type0')], ['BaseFont', name], ['Encoding', N('Identity-H')],
+    ['DescendantFonts', [new Ref(cid)]], ['ToUnicode', await stream(new Map(), enc.encode(cmap))],
+  ])
+  return new Ref(font)
 }
 
 // The OCR text font: Type0 with Identity-H codes = UTF-16 code units, every code drawn with the one empty
@@ -850,8 +920,8 @@ function addMark(out, alloc, pageRef, o, box) {
 // size makes a blank page; crop ([left, bottom, right, top] in the page's own space) narrows what shows;
 // text is an invisible OCR text layer (see decorate).
 // options: { level: 'lossless' or a key of LEVELS, gray: images to grayscale, numbers, watermark, flatten,
-// textImage (see decorate), impose: 1 | 2 | 4 (see impose), strip: drop hidden info, encrypt (see encryptAll) }
-export async function buildPdf(parts, { level, gray, numbers, watermark, flatten, textImage, impose: per, strip, encrypt } = {}) {
+// textImage and fonts (see decorate), impose: 1 | 2 | 4 (see impose), strip: drop hidden info, encrypt (see encryptAll) }
+export async function buildPdf(parts, { level, gray, numbers, watermark, flatten, textImage, fonts, impose: per, strip, encrypt } = {}) {
   const out = [null, null, null] // 1 catalog, 2 page tree
   const alloc = () => out.push(null) - 1
   const state = new Map() // doc -> { pages: srcNum -> newNum, copied: srcNum -> newNum }
@@ -932,7 +1002,7 @@ export async function buildPdf(parts, { level, gray, numbers, watermark, flatten
     return { slot: slots[i], dict: out[slots[i]], box, view: crop ?? box, rotate: out[slots[i]].get('Rotate'), overlays, text }
   })
   // sheets of several pages are drawn from the pages' contents, so what should show of fields and marks is painted in first
-  await decorate(out, alloc, pages, { numbers, watermark, flatten: flatten || !!per, textImage })
+  await decorate(out, alloc, pages, { numbers, watermark, flatten: flatten || !!per, textImage, fonts })
   if (per) await impose(out, alloc, pages, per)
   if (strip) stripHidden(out)
   if (level) await optimize(out)
