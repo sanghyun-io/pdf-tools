@@ -254,7 +254,6 @@ header a { color: var(--accent); }
   .editor-tools button.icon { width: 32px; height: 32px; }
 }
 button[aria-pressed="true"] { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
-.editor-tools textarea.note-text { flex: 1 1 260px; }
 /* marks: drawn over the page picture; the highlighters darken it as ink would (multiply) */
 .editor .item svg { position: absolute; inset: 0; overflow: visible; pointer-events: none; }
 .editor .item.highlight, .editor .item.marker, .editor .draft.marker { mix-blend-mode: multiply; }
@@ -274,8 +273,15 @@ button[aria-pressed="true"] { background: var(--accent-soft); border-color: var(
 }
 .editor .text-menu.below { transform: translate(-50%, 8px); }
 .editor .text-menu :is(button, select) { padding: 4px 8px; font-size: 13px; }
-.editor .text-menu .swatch { width: 22px; height: 22px; padding: 0; border: 2px solid #fff; border-radius: 50%; box-shadow: 0 0 0 1px var(--line); }
-.editor .text-menu .swatch[aria-pressed="true"] { box-shadow: 0 0 0 2px var(--accent); }
+.editor .swatch { width: 22px; height: 22px; padding: 0; border: 2px solid #fff; border-radius: 50%; box-shadow: 0 0 0 1px var(--line); }
+.editor .swatch[aria-pressed="true"] { box-shadow: 0 0 0 2px var(--accent); }
+/* beside a selected note */
+.editor .note-menu {
+  position: absolute; z-index: 5; width: 250px; box-sizing: border-box; padding: 8px;
+  background: var(--card); border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 4px 14px rgb(0 0 0 / 0.18);
+}
+.editor .note-menu textarea { display: block; width: 100%; box-sizing: border-box; padding: 6px 8px; font: inherit; font-size: 14px; border: 1px solid var(--line); border-radius: 8px; resize: vertical; }
+.editor .note-menu .swatches { display: flex; align-items: center; gap: 6px; margin-top: 8px; font-size: 13px; }
 .editor .text-menu .sep { width: 1px; height: 20px; background: var(--line); }
 /* pdf.js's text layer, from pdfjs-dist web/pdf_viewer.css (Apache-2.0): just what picking text needs */
 .textLayer {

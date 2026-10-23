@@ -391,7 +391,8 @@ export default function Editor({ page, source, onApply, onClose }) {
   const drawing = tool !== 'select'
   const ppt = fit ? fit.width / W : 1 // px per point
   // which style controls to show: for the tool, else for the selected mark
-  const styled = tool !== 'select' ? tool : activeItem?.kind === 'ink' ? (activeItem.marker ? 'highlight' : 'pen') : activeItem?.kind
+  // (a selected note has its own box beside it)
+  const styled = tool !== 'select' ? tool : activeItem?.kind === 'ink' ? (activeItem.marker ? 'highlight' : 'pen') : activeItem?.kind === 'note' ? null : activeItem?.kind
   const markerStyle = styled === 'highlight' || styled === 'note'
 
   return (
@@ -451,17 +452,6 @@ export default function Editor({ page, source, onApply, onClose }) {
             )}
           </>
         )}
-        {activeItem?.kind === 'note' && (
-          <textarea
-            ref={noteText} className="note-text" rows={2} placeholder="메모 내용" value={activeItem.text}
-            onFocus={() => { typing.current = false }}
-            onChange={(e) => {
-              if (!typing.current) remember()
-              typing.current = true
-              update(activeItem.id, { text: e.target.value })
-            }}
-          />
-        )}
       </div>
       {error && <p className="error">{error}</p>}
       {redacting && (
@@ -489,6 +479,23 @@ export default function Editor({ page, source, onApply, onClose }) {
           {drawing && <div className="draw" onPointerDown={startDraw} title={TOOLS[tool][1]} />}
           {draft && fit && <Draft {...draft} fit={fit} style={style} ppt={ppt} />}
           {picked && fit && items && <TextMenu picked={picked} items={items} fit={fit} lineColor={style.color} onMark={markPicked} />}
+          {activeItem?.kind === 'note' && fit && (
+            <NoteMenu
+              note={activeItem} fit={fit} textRef={noteText}
+              onFocus={() => { typing.current = false }}
+              onText={(text) => {
+                if (!typing.current) remember()
+                typing.current = true
+                update(activeItem.id, { text })
+              }}
+              onColor={(color) => {
+                if (color === activeItem.color) return
+                remember()
+                update(activeItem.id, { color })
+                setStyleState((s) => ({ ...s, marker: color })) // and for the next note
+              }}
+            />
+          )}
         </div>
       </div>
       <div className="actions">
@@ -530,6 +537,24 @@ function TextMenu({ picked, items, fit, lineColor, onMark }) {
       >
         {Object.entries(COLORS).map(([v, label]) => <option key={v} value={v}>{label}</option>)}
       </select>
+    </div>
+  )
+}
+
+// Beside a selected note: what it says and its color (the current one pressed). Opens on the side with room.
+function NoteMenu({ note, fit, textRef, onFocus, onText, onColor }) {
+  const gap = 8, width = 250 // px
+  const left = note.view.x * fit.width, right = (note.view.x + note.view.w) * fit.width
+  const place = { top: note.view.y * fit.height, ...(right + gap + width > fit.width ? { right: fit.width - left + gap } : { left: right + gap }) }
+  return (
+    <div className="note-menu" style={place} role="group" aria-label="메모" onPointerDown={(e) => e.stopPropagation()}>
+      <textarea ref={textRef} rows={4} placeholder="메모 내용" value={note.text} onFocus={onFocus} onChange={(e) => onText(e.target.value)} />
+      <div className="swatches">
+        <span className="muted">색</span>
+        {Object.entries(MARKERS).map(([c, name], i) => (
+          <button key={c} className="swatch" style={{ background: c }} aria-pressed={note.color === c} aria-label={`메모 색 ${name}`} title={i ? name : `${name} (기본)`} onClick={() => onColor(c)} />
+        ))}
+      </div>
     </div>
   )
 }
