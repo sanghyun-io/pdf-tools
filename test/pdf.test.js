@@ -13,7 +13,7 @@ import { loadModel } from '../src/ocr/model.js'
 import { recognizeLine } from '../src/ocr/recognize.js'
 import { recognizePage } from '../src/ocr/page.js'
 import { inAppBrowser } from '../src/inapp.js'
-import { turnMark } from '../src/decor.js'
+import { turnMark, layoutText, layoutTable } from '../src/decor.js'
 
 const fixture = (name) => new Uint8Array(readFileSync(new URL(`fixtures/${name}`, import.meta.url)))
 const latin1 = (s) => Uint8Array.from(s, (c) => c.charCodeAt(0))
@@ -312,6 +312,51 @@ test('a mark turned with its page keeps its points where the page puts them', ()
   near([turned.x + ru * turned.w, turned.y + rv * turned.h, rw * turned.w, rh * turned.h], [1 - y1, x0, y1 - y0, x1 - x0], 'text box')
   const flat = (o) => [o.x, o.y, o.w, o.h, ...o.ends, ...o.lines.flat(), ...o.rects.flat()]
   near(flat(turnMark(mark, 4)), flat(mark), 'four quarter turns')
+})
+
+// a stand-in font: every character 1pt wide, a space half that
+const mono = (s) => [...s].reduce((w, c) => w + (c === ' ' ? 0.5 : 1), 0)
+
+test('text wraps between 어절, cuts a word longer than the line, breaks Han anywhere, keeps blank lines', () => {
+  const lines = (text, width, more) => layoutText(text, { size: 10, width, ...more }, mono).lines.map((l) => l.text)
+  assert.deepEqual(lines('가나 다라마 바', 5), ['가나', '다라마 바'])
+  assert.deepEqual(lines('가나다라마바사', 3), ['가나다', '라마바', '사'])
+  assert.deepEqual(lines('가 나다라마바', 3), ['가 나', '다라마', '바']) // the long word fills the line first
+  assert.deepEqual(lines('漢字漢字', 2), ['漢字', '漢字'])
+  assert.deepEqual(lines('첫 줄\n\n셋째', 10), ['첫 줄', '', '셋째'])
+  const { lines: right, height, lineH } = layoutText('가나\n가나다', { size: 10, width: 6, align: 'right', lineHeight: 1.5 }, mono)
+  assert.deepEqual(right.map((l) => l.x), [4, 3])
+  assert.deepEqual([lineH, height], [15, 30])
+  const centered = layoutText('가나', { size: 10, width: 6, align: 'center' }, mono).lines[0]
+  assert.equal(centered.x, 2)
+})
+
+test('table rows are as tall as their tallest cell; columns share the width', () => {
+  const t = { rows: [['이름', '설명'], ['가', '가나다라마바사아자차']], widths: [0.25, 0.75], size: 10, header: true }
+  const { cols, rows, height, pad } = layoutTable(t, 20, () => mono)
+  assert.deepEqual(cols.map((c) => [c.x, c.w]), [[0, 5], [5, 15]])
+  assert.equal(rows[0].bold, true)
+  // the long cell wraps to two lines in 15 - 2 * 4.5 = 6pt: its row is two lines tall
+  assert.deepEqual(rows[1].cells[1].lines.map((l) => l.text), ['가나다라마바', '사아자차'])
+  assert.equal(rows[1].h, 2 * 13 + 2 * pad)
+  assert.equal(height, rows[0].h + rows[1].h)
+})
+
+test('a text box picture carries its words as invisible text where they show, turning with its page', async () => {
+  const doc = await readPdf(fixture('chrome.pdf'))
+  const pixels = { width: 2, height: 1, rgb: new Uint8Array(6), alpha: null }
+  const box = { image: pixels, x: 0.2, y: 0.3, w: 0.4, h: 0.1, rot: 0, runs: [{ x: 10, y: 20, size: 12, words: [{ text: '검색되는', at: 0, width: 48 }, { text: '글자', at: 54, width: 24 }] }] }
+  const { bytes } = await buildPdf([{ doc, index: 0, rotate: 0, overlays: [box] }, { doc, index: 1, rotate: 90, overlays: [box] }])
+  const found = await eachPage(bytes, async (page) => {
+    const vp = page.getViewport({ scale: 1, rotation: 0 }) // as the box was placed
+    const item = (await page.getTextContent()).items.find((t) => t.str.startsWith('검색되는'))
+    const [x, y] = apply(vp.transform, item.transform[4], item.transform[5])
+    return [x / vp.width, y / vp.height, item.str]
+  })
+  for (const [x, y, str] of found) {
+    near([x, y], [0.2 + 10 / 594.96, 0.3 + 20 / 841.92], 'baseline start')
+    assert.equal(str, '검색되는 글자') // a reader joins the words with a space
+  }
 })
 
 test('flatten paints marks into the page; notes stay notes', async () => {

@@ -58,6 +58,7 @@ export async function imagePixels(file, { maxSide = 1600, opacity = 1, clearWhit
 }
 
 const FONT = '"Malgun Gothic", "Apple SD Gothic Neo", "Noto Sans KR", sans-serif'
+export const TEXT_FONT = FONT // the editor shows text boxes in the font they are drawn with
 // a name written as a signature: handwriting-like fonts a PC may have, else the browser's cursive
 export const SIGN_FONT = '"Nanum Pen Script", "Nanum Brush Script", "Segoe Script", "Gungsuh", cursive'
 
@@ -78,6 +79,125 @@ export async function textPixels(text, { size = 12, color = '#000000', opacity =
   lines.forEach((l, i) => ctx.fillText(l, 0, (i - (lines.length - 1) / 2) * lineH))
   return pixels(canvas)
 }
+
+// ---- text boxes and tables (the page editor's 글상자 and 표) ----
+// Laid out here once, the same way for the editor's screen and for the saved picture, in points.
+
+const CJK = /[⺀-⿿぀-ヿ㐀-䶿一-鿿豈-﫿]/ // Han and kana: a line may break between any two
+const graphemes = (s) => (typeof Intl.Segmenter === 'function' ? [...new Intl.Segmenter('ko', { granularity: 'grapheme' }).segment(s)].map((g) => g.segment) : Array.from(s))
+// the pieces a line may break between: a word with the spaces after it (Korean breaks between 어절, as in
+// Korean word processors), or one Han or kana character
+const atoms = (s) => s.match(new RegExp(`${CJK.source}\\s*|[^\\s${CJK.source.slice(1, -1)}]+\\s*|\\s+`, 'g')) ?? []
+
+// pt width of text in a font: font is a CSS font string at 1pt-per-px scale
+export function canvasMeasure(font) {
+  const ctx = new OffscreenCanvas(1, 1).getContext('2d')
+  ctx.font = font
+  return (s) => ctx.measureText(s).width
+}
+const fontOf = ({ size, bold }, family = FONT) => `${bold ? 'bold ' : ''}${size}px ${family}`
+
+// Wraps text to `width` pt as pdfme does (src/text/wrap.ts, MIT, read with REA): each paragraph is filled
+// piece by piece; a piece that fits on a full line moves to the next one, a longer one fills what is left
+// and is cut between characters. Returns lines { text, x, width } (x from the alignment) and the height.
+// measure(s) -> pt (canvasMeasure, or a stand-in for tests).
+export function layoutText(text, { size = 12, lineHeight = 1.4, align = 'left', width, bold = false }, measure = canvasMeasure(fontOf({ size, bold }))) {
+  const lines = []
+  const push = (s) => {
+    const t = s.replace(/\s+$/, ''), w = measure(t)
+    lines.push({ text: t, width: w, x: align === 'center' ? (width - w) / 2 : align === 'right' ? width - w : 0 })
+  }
+  for (const paragraph of text.split('\n')) {
+    let line = ''
+    const fits = (s) => measure(s.replace(/\s+$/, '')) <= width
+    for (const piece of atoms(paragraph)) {
+      if (fits(line + piece)) { line += piece; continue }
+      if (line && fits(piece)) { push(line); line = piece.replace(/^\s+/, ''); continue }
+      for (const g of graphemes(piece)) { // longer than a line: fill it, then cut between characters
+        if (line && !fits(line + g)) { push(line); line = g.trim() ? g : '' } else line += g
+      }
+    }
+    push(line)
+  }
+  const lineH = size * lineHeight
+  return { lines, lineH, height: Math.max(1, lines.length) * lineH }
+}
+
+const PAD = 0.45 // a table cell's padding, in its font size
+export const tableFonts = (t) => {
+  const plain = canvasMeasure(fontOf(t)), bold = canvasMeasure(fontOf({ ...t, bold: true }))
+  return (isBold) => (isBold ? bold : plain)
+}
+// Columns by width share (t.widths), rows as tall as their tallest cell; the header row (t.header) bold.
+// Returns { cols: [{ x, w }], rows: [{ y, h, cells: [layout] }], height, pad } in pt for a table `width` pt
+// wide. fonts(bold) -> measure (tableFonts, or a stand-in for tests).
+export function layoutTable(t, width, fonts = tableFonts(t)) {
+  const pad = t.size * PAD
+  const cols = t.widths.map((share, c) => ({ x: t.widths.slice(0, c).reduce((a, b) => a + b, 0) * width, w: share * width }))
+  let y = 0
+  const rows = t.rows.map((row, r) => {
+    const bold = !!t.header && r === 0
+    const cells = row.map((s, c) => layoutText(s, { size: t.size, lineHeight: 1.3, width: Math.max(1, cols[c].w - 2 * pad), bold }, fonts(bold)))
+    const out = { y, h: Math.max(...cells.map((l) => l.height)) + 2 * pad, cells, bold }
+    y += out.h
+    return out
+  })
+  return { cols, rows, height: y, pad }
+}
+
+// A layout's lines as invisible text for a reader (decorate in pdf.js): baselines in pt from the box's top-left.
+const BASELINE = 0.33 // below the middle of the line, in the font size
+function textRuns(layout, size, dx, dy, measure) {
+  return layout.lines.flatMap((l, i) => {
+    const words = [], re = /\S+/g
+    for (let m; (m = re.exec(l.text));) words.push({ text: m[0], at: measure(l.text.slice(0, m.index)), width: measure(m[0]) })
+    return words.length ? [{ x: dx + l.x, y: dy + (i + 0.5) * layout.lineH + size * BASELINE, size, words }] : []
+  })
+}
+
+// A text box as a picture at PX_PER_PT, plus its words for decorate's invisible text. o: { text, size, bold,
+// color, align, lineHeight }, width in pt.
+export async function textBoxPixels(o, width) {
+  const measure = canvasMeasure(fontOf(o))
+  const layout = layoutText(o.text, { ...o, width }, measure)
+  const canvas = new OffscreenCanvas(Math.max(1, Math.ceil(width * PX_PER_PT)), Math.max(1, Math.ceil(layout.height * PX_PER_PT)))
+  const ctx = canvas.getContext('2d')
+  Object.assign(ctx, { font: fontOf({ ...o, size: o.size * PX_PER_PT }), fillStyle: o.color, textBaseline: 'middle' })
+  layout.lines.forEach((l, i) => ctx.fillText(l.text, l.x * PX_PER_PT, (i + 0.5) * layout.lineH * PX_PER_PT))
+  return { image: await pixels(canvas), height: layout.height, runs: textRuns(layout, o.size, 0, 0, measure) }
+}
+
+// A table as a picture (header fill, grid, text) and its words. t: { rows, widths, size, color, header, border, borderColor }
+export async function tablePixels(t, width) {
+  const fonts = tableFonts(t)
+  const layout = layoutTable(t, width, fonts)
+  const k = PX_PER_PT, bw = t.border
+  const canvas = new OffscreenCanvas(Math.ceil((width + bw) * k), Math.ceil((layout.height + bw) * k))
+  const ctx = canvas.getContext('2d')
+  ctx.translate((bw / 2) * k, (bw / 2) * k) // the outer lines stay inside the picture
+  if (t.header && layout.rows[0]) {
+    ctx.fillStyle = HEADER_FILL
+    ctx.fillRect(0, 0, width * k, layout.rows[0].h * k)
+  }
+  const runs = []
+  for (const row of layout.rows) {
+    row.cells.forEach((cell, c) => {
+      const x = layout.cols[c].x + layout.pad, y = row.y + layout.pad
+      Object.assign(ctx, { font: fontOf({ size: t.size * k, bold: row.bold }), fillStyle: t.color, textBaseline: 'middle' })
+      cell.lines.forEach((l, i) => ctx.fillText(l.text, (x + l.x) * k, (y + (i + 0.5) * cell.lineH) * k))
+      runs.push(...textRuns(cell, t.size, x + bw / 2, y + bw / 2, fonts(row.bold)))
+    })
+  }
+  if (bw > 0) {
+    Object.assign(ctx, { strokeStyle: t.borderColor, lineWidth: bw * k })
+    ctx.beginPath()
+    for (const x of [...layout.cols.map((col) => col.x), width]) { ctx.moveTo(x * k, 0); ctx.lineTo(x * k, layout.height * k) }
+    for (const y of [...layout.rows.map((row) => row.y), layout.height]) { ctx.moveTo(0, y * k); ctx.lineTo(width * k, y * k) }
+    ctx.stroke()
+  }
+  return { image: await pixels(canvas), height: layout.height + bw, width: width + bw, runs }
+}
+export const HEADER_FILL = '#e8efff'
 
 // a preview picture turned clockwise, for stamps placed before their page was rotated
 export async function turnedUrl(url, deg) {

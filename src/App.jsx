@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { readPdf, buildPdf, imageToPdf, picturePage, pageInfo, pageBox, moveItems, PasswordError } from './pdf.js'
 import { renderThumbs, renderPages, openPages } from './render.js'
 import { prepare, recognize, textLayer } from './ocr/client.js'
-import { imagePixels, textPixels, turnBox, steps } from './decor.js'
+import { imagePixels, textPixels, turnBox, steps, textBoxPixels, tablePixels } from './decor.js'
 import { zip } from './zip.js'
 import { inAppBrowser } from './inapp.js'
 import Editor from './Editor.jsx'
@@ -171,6 +171,14 @@ export default function App() {
     setSelected(new Set([blank.id]))
     setAnchor(blank.id)
   }
+  // a document from nothing: one blank A4 page, straight into the page editor
+  const newDocument = (landscape) => {
+    const [w, h] = landscape ? [841.89, 595.28] : [595.28, 841.89]
+    const blank = { id: nextId.current++, blank: true, w, h, base: 0, rotate: 0 }
+    commit([blank])
+    setSelected(new Set([blank.id]))
+    setEditing(blank.id)
+  }
   const clearAll = () => {
     commit([]) // undoable, so the loaded files stay in memory
     setSelected(new Set())
@@ -274,13 +282,25 @@ export default function App() {
     return crop
   }
 
+  // Text boxes and tables go to buildPdf as their pictures, with their words for the invisible text (decor.js);
+  // the picture's height is the laid-out one.
+  async function withPictures(p) {
+    return Promise.all((p.overlays ?? []).map(async (o) => {
+      if (o.kind !== 'textbox' && o.kind !== 'table') return o
+      const [W, H] = o.rot % 180 ? [p.h, p.w] : [p.w, p.h] // the page as shown when the box was placed
+      const { image, height, runs } = o.kind === 'textbox' ? await textBoxPixels(o, o.w * W) : await tablePixels(o, o.w * W - o.border)
+      return { image, runs, x: o.x, y: o.y, w: o.w, h: height / H, rot: o.rot }
+    }))
+  }
+
   // what buildPdf gets for each page; withText adds an OCR text layer to pages that have no text
   async function partOf(p, withText) {
-    if (p.blank) return { size: [p.w, p.h], rotate: p.rotate, overlays: p.overlays?.filter((o) => o.kind !== 'redact') }
+    const overlays = (await withPictures(p)).filter((o) => o.kind !== 'redact')
+    if (p.blank) return { size: [p.w, p.h], rotate: p.rotate, overlays }
     const src = sources.current[p.src]
     const crop = opts.autocrop ? await whiteCrop(p) : null
     if (!p.overlays?.some((o) => o.kind === 'redact')) {
-      const part = { doc: src.doc, index: p.index, rotate: p.rotate, overlays: p.overlays, crop }
+      const part = { doc: src.doc, index: p.index, rotate: p.rotate, overlays, crop }
       if (withText) part.text = await ocrText(p, src.bytes, src.password, p.index, pageBox(src.doc, p.index), `${p.src}:${p.index}:${p.base + p.rotate}`)
       return part
     }
@@ -288,7 +308,7 @@ export default function App() {
     const [bx0, by0] = pageBox(src.doc, p.index) // the picture page starts at 0, 0
     // read the redacted picture, never the original: what the boxes cover must not come back as text
     if (withText) part.text = await ocrText(p, picture, '', 0, [0, 0, p.w, p.h])
-    return { ...part, crop: crop && crop.map((v, k) => v - (k % 2 ? by0 : bx0)) }
+    return { ...part, overlays, crop: crop && crop.map((v, k) => v - (k % 2 ? by0 : bx0)) }
   }
 
   // The page drawn as the user sees it (so a scan stored sideways reads upright), read in the OCR worker,
@@ -477,6 +497,11 @@ export default function App() {
             <strong>PDF나 이미지를 여기로 끌어놓거나 클릭해서 고르세요</strong>
             <span className="muted">여러 개를 한 번에 올릴 수 있습니다. 이미지는 A4 한 페이지가 됩니다.</span>
           </label>
+          <p className="start-blank">
+            <span className="muted">또는</span>
+            <button onClick={() => newDocument(false)}>빈 문서 만들기 (A4 세로)</button>
+            <button onClick={() => newDocument(true)}>A4 가로</button>
+          </p>
           {history.length > 0 && <p>{undoButton}</p>}
         </>
       ) : (
@@ -662,10 +687,20 @@ export default function App() {
 
       {editPage && (
         <Editor
-          page={editPage} source={sources.current[editPage.src] ?? null} onClose={() => setEditing(null)}
-          onApply={(overlays) => {
-            commit(pages.map((p) => (p.id === editPage.id ? { ...p, overlays } : p)))
-            setEditing(null)
+          key={editPage.id} page={editPage} source={sources.current[editPage.src] ?? null} onClose={() => setEditing(null)}
+          at={pages.indexOf(editPage)} total={pages.length}
+          onApply={(overlays, go) => { // go: -1 / 1 to the page before / after, 'add' to a new blank page after this one
+            const at = pages.indexOf(editPage)
+            let next = pages.map((p) => (p.id === editPage.id ? { ...p, overlays } : p)), to = null
+            if (go === 'add') {
+              const turned = (((editPage.base + editPage.rotate) % 180) + 180) % 180 !== 0
+              const blank = { id: nextId.current++, blank: true, w: turned ? editPage.h : editPage.w, h: turned ? editPage.w : editPage.h, base: 0, rotate: 0 }
+              next = [...next.slice(0, at + 1), blank, ...next.slice(at + 1)]
+              to = blank.id
+            } else if (go) to = next[at + go]?.id ?? null
+            commit(next)
+            setEditing(to)
+            if (to !== null) setSelected(new Set([to]))
           }}
         />
       )}

@@ -1,6 +1,6 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { openPages } from './render.js'
-import { imagePixels, textPixels, turnedUrl, turnMark, steps, PX_PER_PT, SIGN_FONT } from './decor.js'
+import { imagePixels, textPixels, turnedUrl, turnMark, steps, PX_PER_PT, SIGN_FONT, TEXT_FONT, layoutText, layoutTable, HEADER_FILL } from './decor.js'
 import { MARKS } from './pdf.js'
 import Signature from './Signature.jsx'
 
@@ -10,10 +10,17 @@ const MARKERS = { '#fde047': '노랑', '#86efac': '연두', '#f9a8d4': '분홍',
 const WIDTHS = [1, 2, 4, 8] // pt
 const MARKER_WIDTH = 12 // pt, the free highlighter
 const NOTE = 20 // pt, a note's icon (NOTE_SIZE in pdf.js)
+const TEXT_SIZES = [8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 32, 40, 48]
+const LINE_HEIGHTS = { 1.2: '줄 간격 좁게', 1.4: '줄 간격 보통', 1.8: '줄 간격 넓게' }
+const BORDERS = { 0: '선 없음', 0.5: '선 가늘게', 1: '선 보통', 2: '선 굵게' }
+const BOXES = new Set(['textbox', 'table']) // laid out from their content: as tall as it needs
+const equalWidths = (n) => Array.from({ length: n }, () => 1 / n)
 const MAX_STEPS = 100 // how far back 되돌리기 goes
 // what a press on the page does
 const TOOLS = {
-  select: ['선택', '눌러서 고르고, 끌어서 옮기고, 오른쪽 아래 모서리로 크기를 바꿉니다. 글자를 끌어서 고르면 형광펜·밑줄·취소선을 고를 수 있습니다'],
+  select: ['선택', '눌러서 고르고, 끌어서 옮기고, 오른쪽 아래 모서리로 크기를 바꿉니다. 글자를 끌어서 고르면 형광펜·밑줄·취소선을 고를 수 있습니다. 글상자와 표는 더블클릭해서 고칩니다'],
+  text: ['글상자', '끌어서 폭을 정하거나 누른 곳에 상자를 만들고 바로 입력합니다. 높이는 글에 맞춰 늘어납니다'],
+  table: ['표', '끌어서 폭을 정하거나 누른 곳에 3×3 표를 넣습니다. 칸을 더블클릭해 입력하고, Tab으로 다음 칸으로 갑니다'],
   pen: ['펜', '끌어서 그립니다. 이어서 그린 획은 하나로 묶입니다'],
   highlight: ['형광펜', '끌어서 자유롭게 칠합니다 (스캔처럼 글자가 없는 곳). 글자에 칠하려면 선택 도구로 글자를 끌어서 고르세요'],
   square: ['네모', '끌어서 그립니다'],
@@ -28,6 +35,11 @@ const icon = (body) => (
 )
 const ICONS = {
   select: icon(<path d="M5 3l14 7.5-6.2 1.8L9.5 19z" />),
+  text: icon(<path d="M5 6V4h14v2M12 4v16M9 20h6" />),
+  table: icon(<><rect x="3" y="5" width="18" height="14" rx="1" /><path d="M3 10h18M3 15h18M9 5v14M15 5v14" /></>),
+  left: icon(<path d="M4 6h16M4 10h10M4 14h16M4 18h10" />),
+  center: icon(<path d="M4 6h16M7 10h10M4 14h16M7 18h10" />),
+  right: icon(<path d="M4 6h16M10 10h10M4 14h16M10 18h10" />),
   pen: icon(<><path d="M4 20h4L19 9l-4-4L4 16z" /><path d="M13.5 6.5l4 4" /></>),
   highlight: icon(<><path d="M14 4l6 6-7.5 7.5H7.5v-5z" /><path d="M7.5 12.5l5 5" /><path d="M3 21h11" stroke="#eab308" strokeWidth="3" /></>),
   square: icon(<rect x="4" y="5" width="16" height="14" rx="1" />),
@@ -63,12 +75,14 @@ function cut(box, picked) {
 
 let nextId = 0
 
-// One page, big, to decorate: stamps, signatures, text boxes and redaction boxes, and marks (see MARKS in
-// pdf.js: pen, highlighter, underline, strike-out, shapes, notes) drawn with a tool. Everything can be
-// dragged and resized; marks are saved as annotations. A stamp or mark keeps the rotation the page had when
-// it was placed (decorate() in pdf.js), so after a later rotation it is shown turned here. Redaction boxes
-// ({ kind: 'redact' }, no image) are burned in by App when saving.
-export default function Editor({ page, source, onApply, onClose }) {
+// One page, big, to decorate: stamps, signatures, redaction boxes, text boxes and tables written in place
+// (drawn as pictures with invisible text when saving, App), and marks (see MARKS in pdf.js: pen,
+// highlighter, underline, strike-out, shapes, notes) drawn with a tool. Everything can be dragged and
+// resized; marks are saved as annotations. A stamp, box or mark keeps the rotation the page had when it was
+// placed (decorate() in pdf.js), so after a later rotation it is shown turned here. Redaction boxes
+// ({ kind: 'redact' }, no image) are burned in by App when saving. at / total: this page's place, for
+// going to the page before or after (onApply(overlays, -1 | 1 | 'add')).
+export default function Editor({ page, source, onApply, onClose, at = 0, total = 1 }) {
   const rot = (((page.base + page.rotate) % 360) + 360) % 360
   const [W, H] = rot % 180 ? [page.h, page.w] : [page.w, page.h] // points, as shown
   const [picture, setPicture] = useState(null)
@@ -77,17 +91,17 @@ export default function Editor({ page, source, onApply, onClose }) {
   const [history, setHistory] = useState({ past: [], future: [] }) // earlier and undone `items`
   const [active, setActive] = useState(null)
   const [tool, setTool] = useState('select')
-  const [style, setStyleState] = useState({ color: '#000000', marker: '#fde047', width: 2, fill: false })
+  const [style, setStyleState] = useState({ color: '#000000', marker: '#fde047', width: 2, fill: false, size: 12, bold: false, align: 'left', lineHeight: 1.4, border: 1, header: true })
+  const [writing, setWriting] = useState(null) // the text box or table cell being typed in: { id, cell: [row, col] }
   const [draft, setDraft] = useState(null) // the stroke or shape being drawn: { tool, pts: [x, y, ...] } in page fractions
   const [picked, setPicked] = useState(null) // text picked with the select tool, line boxes: offers the text menu
   const [signing, setSigning] = useState(false)
-  const [text, setText] = useState({ value: '', size: 12, color: '#000000' })
   const [clearWhite, setClearWhite] = useState(true)
   const [error, setError] = useState(null)
   const [fit, setFit] = useState(null) // paper size in px
   const stage = useRef(null), paper = useRef(null), textLayer = useRef(null), noteText = useRef(null)
   const extend = useRef(null) // the pen drawing later strokes join, until the tool or style changes
-  const typing = useRef(false) // a note's text being written: one step until the box is left
+  const typing = useRef(false) // a note, text box or cell being written: one step until it is left
 
   useEffect(() => {
     let live = true
@@ -145,14 +159,46 @@ export default function Editor({ page, source, onApply, onClose }) {
     restore(history.future[0])
   }
 
+  // A text box or table in its own frame (it turns with the page it was placed on): quarter turns to how it
+  // shows now, and its size there in points.
+  const turnOf = (it) => steps(it.rot, rot)
+  const own = (it) => (turnOf(it) % 2 ? { w: it.view.h * H, h: it.view.w * W } : { w: it.view.w * W, h: it.view.h * H })
+  // as tall as its content: it grows downwards in its own frame, which is another way on screen once turned
+  function fitted(it) {
+    if (!BOXES.has(it.kind)) return it
+    const { w, h } = own(it)
+    const tall = it.kind === 'textbox' ? layoutText(it.text || ' ', { ...it, width: w }).height : layoutTable(it, w - it.border).height + it.border
+    const d = tall - h, v = it.view
+    const view = [{ ...v, h: v.h + d / H }, { ...v, x: v.x - d / W, w: v.w + d / W }, { ...v, y: v.y - d / H, h: v.h + d / H }, { ...v, w: v.w + d / W }][turnOf(it)]
+    return { ...it, view }
+  }
+
   const put = (item) => {
     remember()
     const id = nextId++
-    setItems((list) => [...list, { id, rot, ...item }])
+    setItems((list) => [...list, fitted({ id, rot, ...item })])
     setActive(id)
     return id
   }
-  const update = (id, fields) => setItems((list) => list.map((it) => (it.id === id ? { ...it, ...fields } : it)))
+  const update = (id, fields) => setItems((list) => list.map((it) => (it.id === id ? fitted({ ...it, ...fields }) : it)))
+  // typing: one step per text box or cell typed in
+  const type = (id, fields) => {
+    if (!typing.current) remember()
+    typing.current = true
+    update(id, fields)
+  }
+  const write = (id, cell = null) => {
+    typing.current = false
+    setWriting({ id, cell })
+    setActive(id)
+  }
+  // leaving a text box: one left empty goes
+  const stopWriting = () => {
+    if (!writing) return
+    const it = items.find((x) => x.id === writing.id)
+    if (it?.kind === 'textbox' && !it.text.trim()) setItems((list) => list.filter((x) => x.id !== it.id))
+    setWriting(null)
+  }
   const add = (fields, w, h) => {
     const k = Math.min(1, 0.9 / w, 0.9 / h)
     put({ view: { x: (1 - w * k) / 2, y: (1 - h * k) / 2, w: w * k, h: h * k }, viewUrl: fields.image?.url, ...fields })
@@ -168,12 +214,6 @@ export default function Editor({ page, source, onApply, onClose }) {
       setError(e.message)
     }
   }
-  async function addText() {
-    if (!text.value.trim()) return
-    const img = await textPixels(text.value, { size: text.size, color: text.color })
-    add(image(img), img.width / PX_PER_PT / W, img.height / PX_PER_PT / H)
-    setText((t) => ({ ...t, value: '' }))
-  }
   const remove = () => {
     if (active === null) return
     remember()
@@ -184,31 +224,53 @@ export default function Editor({ page, source, onApply, onClose }) {
 
   const chooseTool = (t) => {
     extend.current = null
+    stopWriting()
     setTool(t)
     setPicked(null)
     if (t !== 'select') setActive(null)
   }
-  // a new color, width or fill also changes the selected mark
+  // A new style changes the selected mark, text box or table. With a box selected it is that box's alone (a
+  // title made big doesn't make the next box big); otherwise it is what new ones get.
   function setStyle(fields) {
     extend.current = null
-    setStyleState((s) => ({ ...s, ...fields }))
     const it = activeItem
-    if (!it || !MARKS.has(it.kind)) return
-    const marker = it.kind === 'highlight' || it.kind === 'note' || it.marker
-    const f = {}
-    if (fields.color && !marker) f.color = fields.color
-    if (fields.marker && marker) f.color = fields.marker
-    if (fields.width && 'width' in it && !it.marker) f.width = fields.width
-    if ('fill' in fields && (it.kind === 'square' || it.kind === 'circle')) f.fill = fields.fill ? tint(it.color) : null
-    if (f.color && it.fill) f.fill = tint(f.color)
+    if (!BOXES.has(it?.kind)) setStyleState((s) => ({ ...s, ...fields }))
+    if (!it) return
+    const only = (keys) => Object.fromEntries(Object.entries(fields).filter(([k]) => keys.includes(k)))
+    let f = {}
+    if (it.kind === 'textbox') f = only(['size', 'bold', 'color', 'align', 'lineHeight'])
+    else if (it.kind === 'table') f = only(['size', 'color', 'border', 'header'])
+    else if (MARKS.has(it.kind)) {
+      const marker = it.kind === 'highlight' || it.kind === 'note' || it.marker
+      if (fields.color && !marker) f.color = fields.color
+      if (fields.marker && marker) f.color = fields.marker
+      if (fields.width && 'width' in it && !it.marker) f.width = fields.width
+      if ('fill' in fields && (it.kind === 'square' || it.kind === 'circle')) f.fill = fields.fill ? tint(it.color) : null
+      if (f.color && it.fill) f.fill = tint(f.color)
+    }
     if (!Object.keys(f).length) return
     remember()
     update(it.id, f)
+  }
+  // add or take out a row or column, next to the cell being typed in (else at the end); columns stay equal
+  function tableChange(op) {
+    const t = activeItem
+    const [r, c] = writing?.id === t.id && writing.cell ? writing.cell : [t.rows.length - 1, t.widths.length - 1]
+    let rows = t.rows.map((row) => [...row]), widths = t.widths
+    if (op === 'row+') rows.splice(r + 1, 0, widths.map(() => ''))
+    else if (op === 'row-' && rows.length > 1) rows.splice(r, 1)
+    else if (op === 'col+') { rows = rows.map((row) => [...row.slice(0, c + 1), '', ...row.slice(c + 1)]); widths = equalWidths(widths.length + 1) }
+    else if (op === 'col-' && widths.length > 1) { rows = rows.map((row) => row.filter((_, k) => k !== c)); widths = equalWidths(widths.length - 1) }
+    else return
+    remember()
+    if (writing?.id === t.id) setWriting(null)
+    update(t.id, { rows, widths })
   }
 
   function drag(e, id, mode) {
     e.preventDefault()
     e.stopPropagation()
+    if (writing && writing.id !== id) stopWriting()
     setActive(id)
     extend.current = null
     const r = paper.current.getBoundingClientRect()
@@ -222,13 +284,13 @@ export default function Editor({ page, source, onApply, onClose }) {
       let v
       if (mode === 'move') {
         v = { ...from, x: Math.min(Math.max(0, from.x + dx), 1 - from.w), y: Math.min(Math.max(0, from.y + dy), 1 - from.h) }
-      } else if (kind === 'redact' || MARKS.has(kind)) { // any shape
+      } else if (kind === 'redact' || MARKS.has(kind) || BOXES.has(kind)) { // any shape (a box then fits its content)
         v = { ...from, w: Math.max(0.01, Math.min(from.w + dx, 1 - from.x)), h: Math.max(0.005, Math.min(from.h + dy, 1 - from.y)) }
       } else { // resize from the bottom-right corner, keeping the shape
         const w = Math.max(0.02, Math.min(from.w + dx, 1 - from.x, ((1 - from.y) * from.w) / from.h))
         v = { ...from, w, h: (w * from.h) / from.w }
       }
-      setItems((list) => list.map((it) => (it.id === id ? { ...it, view: v } : it)))
+      setItems((list) => list.map((it) => (it.id === id ? (mode === 'move' ? { ...it, view: v } : fitted({ ...it, view: v })) : it)))
     }
     const up = () => {
       window.removeEventListener('pointermove', move)
@@ -277,6 +339,16 @@ export default function Editor({ page, source, onApply, onClose }) {
       return
     }
     if (t === 'pen' || t === 'highlight') return addStroke(pts, t === 'highlight')
+    if (t === 'text' || t === 'table') { // the drag sets the width (a click: a default one); the height follows the content
+      const w = tiny ? (t === 'text' ? 0.4 : 0.6) : Math.max(0.05, Math.abs(x1 - x0))
+      const view = { x: Math.min(tiny ? x0 : Math.min(x0, x1), 1 - w), y: Math.min(y0, y1), w, h: 0.02 }
+      const id = t === 'text'
+        ? put({ kind: 'textbox', view, text: '', size: style.size, bold: style.bold, color: style.color, align: style.align, lineHeight: style.lineHeight })
+        : put({ kind: 'table', view, rows: [['', '', ''], ['', '', ''], ['', '', '']], widths: equalWidths(3), size: Math.min(style.size, 11), color: style.color, header: style.header, border: style.border, borderColor: '#000000' })
+      setTool('select')
+      write(id, t === 'table' ? [0, 0] : null)
+      return
+    }
     if (t === 'square' || t === 'circle') {
       const box = tiny
         ? { x: Math.min(Math.max(0, x0 - 0.1), 0.8), y: Math.min(Math.max(0, y0 - 0.05), 0.9), w: 0.2, h: 0.1 }
@@ -373,7 +445,8 @@ export default function Editor({ page, source, onApply, onClose }) {
     put({ kind: 'ink', view: { x: (1 - w) / 2, y: (1 - h) / 2, w, h }, lines: sig.lines, color: style.color, width: 2, marker: false })
   }
 
-  const apply = () => onApply(items.map(({ id: _id, view, viewUrl: _url, ...o }) => turnMark({ ...o, ...view }, steps(rot, o.rot))))
+  // what the page gets: every item back in the frame it was placed in. go: to another page after applying
+  const apply = (go) => onApply(items.map(({ id: _id, view, viewUrl: _url, ...o }) => turnMark({ ...o, ...view }, steps(rot, o.rot))), go)
   const redacting = items?.some((it) => it.kind === 'redact')
   const onKey = (e) => {
     if (e.target.closest('input, textarea, select, .signature')) return // text boxes keep their own undo and Delete
@@ -394,6 +467,9 @@ export default function Editor({ page, source, onApply, onClose }) {
   // (a selected note has its own box beside it)
   const styled = tool !== 'select' ? tool : activeItem?.kind === 'ink' ? (activeItem.marker ? 'highlight' : 'pen') : activeItem?.kind === 'note' ? null : activeItem?.kind
   const markerStyle = styled === 'highlight' || styled === 'note'
+  const textStyle = styled === 'text' || styled === 'textbox', tableStyle = styled === 'table'
+  // the style a selected box has, else the one new boxes get
+  const look = BOXES.has(activeItem?.kind) ? { ...style, ...activeItem } : style
 
   return (
     <dialog className="modal editor" ref={(el) => el && !el.open && el.showModal()} onClose={onClose} onKeyDown={onKey}>
@@ -404,18 +480,6 @@ export default function Editor({ page, source, onApply, onClose }) {
         </label>
         <label className="check"><input type="checkbox" checked={clearWhite} onChange={(e) => setClearWhite(e.target.checked)} /> 흰 배경 투명하게</label>
         <button onClick={() => setSigning(true)} title="마우스나 손가락으로 그리거나, 이름을 손글씨체로 씁니다">서명 만들기</button>
-        <span className="sep" />
-        <textarea
-          rows={1} placeholder="글상자에 넣을 글" value={text.value}
-          onChange={(e) => setText((t) => ({ ...t, value: e.target.value }))}
-        />
-        <select value={text.size} onChange={(e) => setText((t) => ({ ...t, size: Number(e.target.value) }))} title="글자 크기">
-          {[9, 10, 12, 14, 16, 20, 24, 32, 48].map((s) => <option key={s} value={s}>{s}pt</option>)}
-        </select>
-        <select value={text.color} onChange={(e) => setText((t) => ({ ...t, color: e.target.value }))} title="글자 색">
-          {Object.entries(COLORS).map(([v, label]) => <option key={v} value={v}>{label}</option>)}
-        </select>
-        <button disabled={!text.value.trim()} onClick={addText}>글상자 넣기</button>
         <span className="sep" />
         <button onClick={() => add({ kind: 'redact' }, 0.3, 0.04)} title="가릴 곳을 검게 칠해 파일에서 지웁니다">가림 상자</button>
         <button disabled={active === null} onClick={remove}>선택한 것 지우기</button>
@@ -452,12 +516,50 @@ export default function Editor({ page, source, onApply, onClose }) {
             )}
           </>
         )}
+        {(textStyle || tableStyle) && (
+          <>
+            <span className="sep" />
+            <select value={look.size} onChange={(e) => setStyle({ size: Number(e.target.value) })} aria-label="글자 크기">
+              {TEXT_SIZES.map((s) => <option key={s} value={s}>{s}pt</option>)}
+            </select>
+            <select value={look.color} onChange={(e) => setStyle({ color: e.target.value })} aria-label="글자 색">
+              {Object.entries(COLORS).map(([v, label]) => <option key={v} value={v}>{label}</option>)}
+            </select>
+          </>
+        )}
+        {textStyle && (
+          <>
+            <button className="icon bold" aria-pressed={!!look.bold} onClick={() => setStyle({ bold: !look.bold })} aria-label="굵게" title="굵게">가</button>
+            {['left', 'center', 'right'].map((a) => (
+              <button key={a} className="icon" aria-pressed={look.align === a} onClick={() => setStyle({ align: a })} aria-label={`${{ left: '왼쪽', center: '가운데', right: '오른쪽' }[a]} 맞춤`} title={`${{ left: '왼쪽', center: '가운데', right: '오른쪽' }[a]} 맞춤`}>{ICONS[a]}</button>
+            ))}
+            <select value={look.lineHeight} onChange={(e) => setStyle({ lineHeight: Number(e.target.value) })} aria-label="줄 간격">
+              {Object.entries(LINE_HEIGHTS).map(([v, label]) => <option key={v} value={v}>{label}</option>)}
+            </select>
+          </>
+        )}
+        {tableStyle && (
+          <>
+            <select value={look.border} onChange={(e) => setStyle({ border: Number(e.target.value) })} aria-label="선 굵기">
+              {Object.entries(BORDERS).map(([v, label]) => <option key={v} value={v}>{label}</option>)}
+            </select>
+            <label className="check"><input type="checkbox" checked={!!look.header} onChange={(e) => setStyle({ header: e.target.checked })} /> 머리 행</label>
+            {activeItem?.kind === 'table' && (
+              <span className="table-ops" role="group" aria-label="행과 열">
+                <button onClick={() => tableChange('row+')} title="고른 칸 아래에 행 넣기 (없으면 맨 아래)">행 +</button>
+                <button onClick={() => tableChange('row-')} disabled={activeItem.rows.length < 2} title="고른 칸의 행 빼기">행 −</button>
+                <button onClick={() => tableChange('col+')} title="고른 칸 오른쪽에 열 넣기">열 +</button>
+                <button onClick={() => tableChange('col-')} disabled={activeItem.widths.length < 2} title="고른 칸의 열 빼기">열 −</button>
+              </span>
+            )}
+          </>
+        )}
       </div>
       {error && <p className="error">{error}</p>}
       {redacting && (
         <p className="muted">가림 상자가 있는 쪽은 저장할 때 그림으로 바뀌어, 가린 글자가 파일에서 완전히 지워집니다. 그 쪽은 글자 선택·검색이 안 됩니다.</p>
       )}
-      <div className="stage" ref={stage} onPointerDown={() => { setActive(null); setPicked(null) }}>
+      <div className="stage" ref={stage} onPointerDown={() => { stopWriting(); setActive(null); setPicked(null) }}>
         <div className={['paper', drawing && 'drawing', selecting && 'selecting'].filter(Boolean).join(' ')} ref={paper} style={fit ?? undefined}>
           {picture ? <img src={picture} alt="" draggable={false} /> : source && <span className="muted">쪽을 그리는 중…</span>}
           <div className="textLayer" ref={textLayer} style={{ '--total-scale-factor': ppt }} onPointerDown={selecting ? pickText : undefined} />
@@ -469,9 +571,26 @@ export default function Editor({ page, source, onApply, onClose }) {
                 key={it.id} className={['item', it.kind, it.marker && 'marker', it.id === active && 'active'].filter(Boolean).join(' ')}
                 style={shape ? { ...box, border: `${it.width * ppt}px solid ${it.color}`, background: it.fill ?? 'none' } : box}
                 onPointerDown={(e) => drag(e, it.id, 'move')} title={it.kind === 'note' ? it.text : undefined}
+                onDoubleClick={it.kind === 'textbox' ? () => write(it.id) : undefined}
               >
                 {it.viewUrl && <img src={it.viewUrl} alt="" draggable={false} />}
                 {MARKS.has(it.kind) && <Mark it={it} w={it.view.w * fit.width} h={it.view.h * fit.height} ppt={ppt} />}
+                {BOXES.has(it.kind) && (
+                  <Turned n={turnOf(it)} w={own(it).w * ppt} h={own(it).h * ppt}>
+                    {it.kind === 'textbox' ? (
+                      <TextBoxView
+                        it={it} width={own(it).w} ppt={ppt} writing={writing?.id === it.id}
+                        onText={(text) => type(it.id, { text })} onDone={() => { stopWriting(); setActive(it.id) }}
+                      />
+                    ) : (
+                      <TableView
+                        it={it} width={own(it).w} ppt={ppt} cell={writing?.id === it.id ? writing.cell : null}
+                        onCell={(r, c, text) => type(it.id, { rows: it.rows.map((row, k) => (k === r ? row.map((s, j) => (j === c ? text : s)) : row)) })}
+                        onGo={(cell) => (cell ? write(it.id, cell) : setWriting(null))}
+                      />
+                    )}
+                  </Turned>
+                )}
                 {!TEXT_MARKS.has(it.kind) && it.kind !== 'note' && <span className="handle" onPointerDown={(e) => drag(e, it.id, 'resize')} />}
               </div>
             )
@@ -499,9 +618,15 @@ export default function Editor({ page, source, onApply, onClose }) {
         </div>
       </div>
       <div className="actions">
-        <span className="muted">도구를 고르고 쪽 위에서 끌어서 그립니다. 선택 도구로 옮기고 크기를 바꾸며, 글자를 끌어서 고르면 형광펜·밑줄·취소선을 고릅니다. Delete 지우기, Ctrl+Z 되돌리기, Ctrl+Y 다시 하기.</span>
+        <span className="pager" role="group" aria-label="쪽 넘기기">
+          <button className="icon" disabled={!items || at === 0} onClick={() => apply(-1)} aria-label="이전 쪽" title="이 쪽을 적용하고 이전 쪽으로">‹</button>
+          <span>{at + 1} / {total}쪽</span>
+          <button className="icon" disabled={!items || at >= total - 1} onClick={() => apply(1)} aria-label="다음 쪽" title="이 쪽을 적용하고 다음 쪽으로">›</button>
+          <button disabled={!items} onClick={() => apply('add')} title="이 쪽을 적용하고, 뒤에 빈 쪽을 넣어 엽니다">쪽 추가</button>
+        </span>
+        <span className="muted">도구를 고르고 쪽 위에서 끌어서 그립니다. 선택 도구로 옮기고 크기를 바꾸며, 글자를 끌어서 고르면 형광펜·밑줄·취소선, 글상자와 표는 더블클릭해서 고칩니다. Ctrl+Z 되돌리기.</span>
         <button onClick={onClose}>취소</button>
-        <button className="primary" disabled={!items} onClick={apply}>적용</button>
+        <button className="primary" disabled={!items} onClick={() => apply()}>적용</button>
       </div>
       {signing && <Signature onPick={addSignature} onClose={() => setSigning(false)} />}
     </dialog>
@@ -556,6 +681,76 @@ function NoteMenu({ note, fit, textRef, onFocus, onText, onColor }) {
         ))}
       </div>
     </div>
+  )
+}
+
+// The inside of a text box or table, drawn in its own frame (w x h px) and turned the quarter turns its page
+// has made since it was placed.
+function Turned({ n, w, h, children }) {
+  const turn = ['none', `translateX(${h}px) rotate(90deg)`, `translate(${w}px, ${h}px) rotate(180deg)`, `translateY(${w}px) rotate(270deg)`][n]
+  return <div className="turned" style={{ width: w, height: h, transform: turn }}>{children}</div>
+}
+
+const fontCss = (o, lineH, ppt, bold = o.bold) => ({ fontFamily: TEXT_FONT, fontSize: o.size * ppt, fontWeight: bold ? 'bold' : 'normal', color: o.color, lineHeight: `${lineH * ppt}px` })
+const caretAtEnd = (e) => e.target.setSelectionRange(e.target.value.length, e.target.value.length)
+
+// A text box (width pt): its lines as they will be saved (decor.js layoutText), or a text area while typed in.
+function TextBoxView({ it, width, ppt, writing, onText, onDone }) {
+  const layout = useMemo(() => layoutText(it.text, { ...it, width }), [it, width])
+  const font = fontCss(it, layout.lineH, ppt)
+  if (writing) {
+    return (
+      <textarea
+        className="box-text" autoFocus onFocus={caretAtEnd} value={it.text} placeholder="글을 입력하세요"
+        style={{ ...font, textAlign: it.align, height: (layout.height + layout.lineH) * ppt }}
+        onPointerDown={(e) => e.stopPropagation()} onChange={(e) => onText(e.target.value)}
+        onKeyDown={(e) => { if (e.key === 'Escape') { e.preventDefault(); onDone() } }}
+      />
+    )
+  }
+  return layout.lines.map((l, i) => <div key={i} className="box-line" style={{ ...font, left: l.x * ppt, top: i * layout.lineH * ppt }}>{l.text}</div>)
+}
+
+// A table (width pt, border included) as it will be saved (decor.js layoutTable): header fill, grid, cell
+// text. A double-clicked cell is typed in; Tab goes to the next cell, Shift+Tab back, Escape stops.
+function TableView({ it, width, ppt, cell, onCell, onGo }) {
+  const layout = useMemo(() => layoutTable(it, width - it.border), [it, width])
+  const k = ppt, o = it.border / 2, inner = width - it.border, cols = it.widths.length
+  const grid = [...layout.cols.map((c) => c.x), inner].map((x) => `M${(o + x) * k} ${o * k}V${(o + layout.height) * k}`)
+    .concat([...layout.rows.map((r) => r.y), layout.height].map((y) => `M${o * k} ${(o + y) * k}H${(o + inner) * k}`)).join('')
+  const step = (r, c, back) => {
+    const i = r * cols + c + (back ? -1 : 1)
+    return i < 0 || i >= it.rows.length * cols ? null : [Math.floor(i / cols), i % cols]
+  }
+  return (
+    <>
+      <svg className="table-grid" width={width * k} height={(layout.height + it.border) * k}>
+        {it.header && layout.rows[0] && <rect x={o * k} y={o * k} width={inner * k} height={layout.rows[0].h * k} fill={HEADER_FILL} />}
+        {it.border > 0 && <path d={grid} stroke={it.borderColor} strokeWidth={it.border * k} fill="none" />}
+      </svg>
+      {layout.rows.flatMap((row, r) => row.cells.map((lay, c) => {
+        const col = layout.cols[c], here = cell?.[0] === r && cell?.[1] === c, pad = layout.pad * k
+        const font = fontCss(it, lay.lineH, k, row.bold)
+        return (
+          <div
+            key={`${r}:${c}`} className="cell" style={{ left: (o + col.x) * k, top: (o + row.y) * k, width: col.w * k, height: row.h * k }}
+            onDoubleClick={(e) => { e.stopPropagation(); onGo([r, c]) }}
+          >
+            {here ? (
+              <textarea
+                className="box-text" autoFocus onFocus={caretAtEnd} value={it.rows[r][c]}
+                style={{ ...font, left: pad, top: pad, width: col.w * k - 2 * pad, height: row.h * k - 2 * pad + lay.lineH * k }}
+                onPointerDown={(e) => e.stopPropagation()} onChange={(e) => onCell(r, c, e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Tab') { e.preventDefault(); onGo(step(r, c, e.shiftKey)) }
+                  if (e.key === 'Escape') { e.preventDefault(); onGo(null) }
+                }}
+              />
+            ) : lay.lines.map((l, i) => <div key={i} className="box-line" style={{ ...font, left: pad + l.x * k, top: pad + i * lay.lineH * k }}>{l.text}</div>)}
+          </div>
+        )
+      }))}
+    </>
   )
 }
 

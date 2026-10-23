@@ -56,6 +56,7 @@ button.ghost { border-color: transparent; background: none; color: var(--muted);
   cursor: pointer;
 }
 .drop:hover { border-color: var(--accent); }
+.start-blank { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: center; margin: 16px 0 0; }
 
 .toolbar {
   position: sticky;
@@ -248,10 +249,25 @@ header a { color: var(--accent); }
 .signature .tabs button { padding: 6px 10px; }
 .editor-tools button.icon { display: grid; place-items: center; width: 36px; height: 34px; padding: 0; }
 .editor-tools .tool-name { min-width: 4em; font-size: 13px; color: var(--muted); } /* the chosen tool, for screens without hover */
+.editor .actions { flex-wrap: wrap; }
+.editor .actions .muted { flex: 1 1 260px; }
 .editor .actions button { flex: none; white-space: nowrap; }
+.editor .pager { display: flex; flex: none; align-items: center; gap: 6px; font-size: 14px; white-space: nowrap; }
+.editor-tools button.bold { font-weight: 800; font-size: 15px; }
+.editor-tools .table-ops { display: inline-flex; gap: 4px; }
+/* text boxes and tables: drawn in their own frame, from the same layout as the saved picture */
+.editor .turned { position: absolute; left: 0; top: 0; transform-origin: 0 0; }
+.editor .box-line { position: absolute; white-space: pre; pointer-events: none; }
+.editor .cell { position: absolute; box-sizing: border-box; }
+.editor .table-grid { position: absolute; left: 0; top: 0; overflow: visible; pointer-events: none; }
+.editor .box-text {
+  position: absolute; left: 0; top: 0; width: 100%; box-sizing: border-box; margin: 0; padding: 0; border: none; resize: none; overflow: hidden;
+  background: rgb(255 255 255 / 0.7); outline: 2px solid var(--accent); white-space: pre-wrap; word-break: keep-all; overflow-wrap: anywhere;
+}
 @media (max-width: 600px) { /* the icons flow as one row that wraps, instead of a group wrapping on its own */
   .editor-tools .tools { display: contents; }
   .editor-tools button.icon { width: 32px; height: 32px; }
+  .editor .actions .muted { display: none; } /* the page needs the room; the tools' tooltips say the same */
 }
 button[aria-pressed="true"] { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
 /* marks: drawn over the page picture; the highlighters darken it as ink would (multiply) */

@@ -497,6 +497,8 @@ function decodeText(b) {
 // numbers: { pos: 'bc'|'br'|'bl'|'tc'|'tr'|'tl', format: key of NUMBER_FORMATS, start, size }
 // watermark: { image } centered on every page; part.overlays: [{ image, x, y, w, h, rot }] with x/y/w/h as
 // fractions of the page as shown turned by `rot` (origin top-left), so a stamp turns with its page later.
+// An overlay may carry runs (a text box or table drawn as its picture): its lines as { x, y (baseline), size,
+// words } in points from the box's top-left, put in as invisible text the same way as part.text.
 // part.text: invisible text (OCR) in the page's own space, by line: [{ x, y, ux, uy, size, words: [{ text,
 // at, width }] }]. A line's baseline starts at (x, y) and runs along (ux, uy); each word starts `at` points
 // along it and spans `width`; glyphs are `size` tall. One text matrix per line, words moved along it, so
@@ -542,9 +544,18 @@ async function decorate(out, alloc, pages, { numbers, watermark, flatten, textIm
       xobjects.set(name, ref ?? await imageRef(img))
       return name
     }, textImage, stale)
-    if (text?.length) { // null: the page had text of its own
+    // a text box or table is a picture; its words go in as invisible text where they show, like OCR text
+    const shown = overlays.filter((o) => o.image && o.runs).flatMap((o) => {
+      const [W, H] = displaySize(box, o.rot), m = displayMatrix(box, o.rot)
+      return o.runs.map((r) => {
+        const X = o.x * W + r.x, Y = (1 - o.y) * H - r.y // points from the box's top-left -> as shown -> page
+        return { ...r, x: m[0] * X + m[2] * Y + m[4], y: m[1] * X + m[3] * Y + m[5], ux: m[0], uy: m[1] }
+      })
+    })
+    const lines = [...(text ?? []), ...shown] // text null: the page had text of its own
+    if (lines.length) {
       fonts.set('PTOcr', await textFont())
-      const runs = text.filter((line) => line.size > 0).flatMap((line) => {
+      const runs = lines.filter((line) => line.size > 0).flatMap((line) => {
         let at = 0
         const words = line.words.flatMap((wd) => {
           // UTF-16 code units are the character codes (Identity-H); outside the BMP becomes U+FFFD
