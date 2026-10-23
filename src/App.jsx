@@ -64,6 +64,7 @@ export default function App() {
   const crops = useRef(new Map()) // "src:index" -> crop box without the white margins (null: blank page)
   const ocrCache = useRef(new Map()) // "src:index:rotation" -> text layer (null: the page had text)
   const ocrPages = useRef(0) // pages read in the current save, for the progress line
+  const blackPages = useRef(new Set()) // pages (as numbered on screen) drawn pure black in the current save
   const [progress, setProgress] = useState(null)
   const [pages, setPages] = useState([]) // { id, src, index, rotate, w, h, base, overlays? } or { id, blank, w, h, ... }
   const [history, setHistory] = useState([]) // earlier `pages` arrays, for undo
@@ -74,7 +75,7 @@ export default function App() {
   const [opts, setOpts] = useState({
     level: '', numbers: '', format: 'of', start: 1,
     mark: '', markText: '대외비', markFile: null, opacity: 0.3,
-    split: 'each', splitN: 2, imageType: 'jpeg', dpi: 150,
+    scope: 'all', out: 'pdf', split: 'each', splitN: 2, imageType: 'jpeg', dpi: 150,
     password: '', noPrint: false, noCopy: false, strip: false, flatten: false,
     gray: false, impose: '', autocrop: false, ocr: false,
   })
@@ -272,7 +273,7 @@ export default function App() {
 
   // what buildPdf gets for each page; withText adds an OCR text layer to pages that have no text
   async function partOf(p, withText) {
-    if (p.blank) return { size: [p.w, p.h], rotate: p.rotate, overlays: p.overlays?.filter((o) => o.image) }
+    if (p.blank) return { size: [p.w, p.h], rotate: p.rotate, overlays: p.overlays?.filter((o) => o.kind !== 'redact') }
     const src = sources.current[p.src]
     const crop = opts.autocrop ? await whiteCrop(p) : null
     if (!p.overlays?.some((o) => o.kind === 'redact')) {
@@ -319,6 +320,7 @@ export default function App() {
     const src = sources.current[p.src]
     let pdf
     await renderPages(src.bytes, { password: src.password, pages: [p.index], rotation: 0, scale: () => REDACT_DPI / 72 }, async (_, canvas) => {
+      if (canvas.black) blackPages.current.add(pages.indexOf(p) + 1)
       const ctx = canvas.getContext('2d')
       ctx.fillStyle = '#000'
       for (const o of p.overlays) {
@@ -345,12 +347,14 @@ export default function App() {
     return Array.from({ length: Math.ceil(list.length / n) }, (_, i) => list.slice(i * n, i * n + n))
   }
 
-  // kind: 'all' | 'selected' | 'split' (one PDF per group, zipped) | 'images' (JPG/PNG per page)
-  async function save(kind) {
-    const list = kind === 'selected' ? pages.filter((p) => selected.has(p.id)) : pages
+  // opts.scope: 'all' | 'selected'; opts.out: 'pdf' | 'split' (one PDF per group, zipped) | 'images' (JPG/PNG per page)
+  async function save() {
+    const kind = opts.out, picked = opts.scope === 'selected'
+    const list = picked ? pages.filter((p) => selected.has(p.id)) : pages
     setBusy(true)
     setMessage(null)
     ocrPages.current = 0
+    blackPages.current.clear()
     try {
       const withText = opts.ocr && OCR_AVAILABLE && kind !== 'images'
       const parts = async (ps) => { // one at a time: rendering and OCR are heavy
@@ -366,6 +370,13 @@ export default function App() {
       const base = nameOf(list)
       const decor = await decorations()
       const after = locked ? ', 암호 걸림' : ''
+      // shown as a warning: the file is saved, but a black page is almost never what the user meant
+      const done = (text) => {
+        const black = [...blackPages.current].sort((a, b) => a - b)
+        setMessage(black.length
+          ? { error: true, text: `${text}. 그런데 ${black.join(', ')}쪽이 새까맣게 그려졌습니다. 원래 검은 쪽이 아니면 다른 탭을 닫고 다시 저장해 주세요` }
+          : { text })
+      }
       if (kind === 'split') {
         const groups = splitGroups(list), used = new Map(), files = []
         for (const [i, group] of groups.entries()) {
@@ -376,27 +387,29 @@ export default function App() {
         }
         const bytes = zip(files)
         download(bytes, `${base}_split.zip`, 'application/zip')
-        setMessage({ text: `${base}_split.zip 저장: PDF ${files.length}개, ${size(bytes.length)}${read()}${after}` })
+        done(`${base}_split.zip 저장: PDF ${files.length}개, ${size(bytes.length)}${read()}${after}`)
       } else if (kind === 'images') {
         const { bytes: pdf } = await buildPdf(await parts(list), decor)
         const [type, ext] = opts.imageType === 'png' ? ['image/png', 'png'] : ['image/jpeg', 'jpg']
         const files = []
         await renderPages(pdf, { scale: () => opts.dpi / 72 }, async (i, canvas) => {
-          const blob = await new Promise((done) => canvas.toBlob(done, type, 0.9))
-          files.push({ name: `${base}_${pad(i + 1, list.length)}.${ext}`, bytes: new Uint8Array(await blob.arrayBuffer()) })
+          const blob = await new Promise((ok) => canvas.toBlob(ok, type, 0.9))
+          const no = pages.indexOf(list[i]) + 1 // the page's place on screen: picked pages 3 and 7 come out as _03 and _07
+          if (canvas.black) blackPages.current.add(no)
+          files.push({ name: `${base}_${pad(no, pages.length)}.${ext}`, bytes: new Uint8Array(await blob.arrayBuffer()) })
         })
         const [bytes, name] = files.length === 1 ? [files[0].bytes, files[0].name] : [zip(files), `${base}_images.zip`]
         download(bytes, name, files.length === 1 ? type : 'application/zip')
-        setMessage({ text: `${name} 저장: 이미지 ${files.length}장, ${size(bytes.length)}` })
+        done(`${name} 저장: 이미지 ${files.length}장, ${size(bytes.length)}`)
       } else {
         const { bytes, saved } = await buildPdf(await parts(list), { ...compression(), ...decor, ...security() })
-        const name = `${base}_${kind === 'selected' ? 'selected' : 'edited'}.pdf`
+        const name = `${base}_${picked ? 'selected' : 'edited'}.pdf`
         download(bytes, name)
         const notes = [
           opts.level && opts.level !== 'lossless' && (saved > 0 ? `이미지에서 ${size(saved)} 줄임` : '줄일 수 있는 이미지가 없었습니다'),
           opts.gray && '이미지 흑백',
         ].filter(Boolean).map((s) => `, ${s}`).join('')
-        setMessage({ text: `${name} 저장: ${list.length}페이지, ${size(bytes.length)}${notes}${read()}${after}` })
+        done(`${name} 저장: ${list.length}페이지, ${size(bytes.length)}${notes}${read()}${after}`)
       }
     } catch (e) {
       setMessage({ error: true, text: `저장하지 못했습니다: ${e.message}` })
@@ -423,7 +436,7 @@ export default function App() {
     opts.password && '열기 암호',
     (opts.noPrint || opts.noCopy) && '인쇄·복사 막기',
     opts.strip && '숨은 정보 지우기',
-    opts.flatten && '양식 굳히기',
+    opts.flatten && '양식·주석 굳히기',
     opts.gray && '흑백',
     opts.impose && LAYOUTS[opts.impose],
     opts.autocrop && '흰 여백 자르기',
@@ -472,7 +485,7 @@ export default function App() {
               <button disabled={!selected.size} onClick={() => rotateSelected(-90)} title="왼쪽으로 90°">↺ 왼쪽</button>
               <button disabled={!selected.size} onClick={() => rotateSelected(90)} title="오른쪽으로 90°">↻ 오른쪽</button>
               <button disabled={!selected.size} onClick={removeSelected}>삭제</button>
-              <button disabled={selected.size !== 1} onClick={() => setEditing([...selected][0])} title="도장·서명·글상자·가림 (쪽을 더블클릭해도 됩니다)">꾸미기</button>
+              <button disabled={selected.size !== 1} onClick={() => setEditing([...selected][0])} title="도장·서명·글상자·가림·펜·형광펜·도형·메모 (쪽을 더블클릭해도 됩니다)">꾸미기</button>
               <button onClick={addBlank} title="선택한 쪽 뒤(없으면 맨 끝)에 넣습니다">빈 쪽</button>
               <button onClick={() => setSelected(new Set(pages.map((p) => p.id)))}>전체 선택</button>
               {undoButton}
@@ -482,10 +495,20 @@ export default function App() {
             </div>
             <div className="row">
               <span className="spacer" />
-              <button disabled={!selected.size || busy} onClick={() => save('selected')}>선택만 저장</button>
-              <button disabled={busy} onClick={() => save('split')}>나누어 저장</button>
-              <button disabled={busy} onClick={() => save('images')}>이미지로 저장</button>
-              <button className="primary" disabled={busy} onClick={() => save('all')}>PDF로 저장</button>
+              <select value={opts.scope} onChange={option('scope')} aria-label="저장할 쪽">
+                <option value="all">전체 {pages.length}쪽</option>
+                <option value="selected" disabled={!selected.size}>선택한 {selected.size}쪽</option>
+              </select>
+              <select value={opts.out} onChange={option('out')} aria-label="저장 형식" title="나누기·이미지 설정은 저장 옵션에 있습니다">
+                <option value="pdf">PDF 하나로</option>
+                <option value="split">나누어 ZIP으로</option>
+                <option value="images">이미지로</option>
+              </select>
+              <button
+                className="primary" onClick={save}
+                disabled={busy || (opts.scope === 'selected' && !selected.size)}
+                title={opts.scope === 'selected' && !selected.size ? '저장할 쪽을 먼저 고르세요' : undefined}
+              >저장</button>
             </div>
           </div>
 
@@ -502,7 +525,7 @@ export default function App() {
                 </label>
               </div>
               <div>배치
-                <select value={opts.impose} onChange={option('impose')} aria-label="모아 찍기" title="모아 찍으면 북마크는 그 장을 가리키고, 링크와 양식 칸은 빠집니다">
+                <select value={opts.impose} onChange={option('impose')} aria-label="모아 찍기" title="모아 찍으면 북마크는 그 장을 가리키고, 양식 칸과 주석은 그려 넣으며, 링크와 메모는 빠집니다">
                   <option value="">쪽 그대로</option>
                   {Object.entries(LAYOUTS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
                 </select>
@@ -556,8 +579,8 @@ export default function App() {
                 <label className="check" title="작성 프로그램 기록, 쪽·이미지 안의 XMP 정보, 메모 작성자 이름. 제목·작성자 같은 문서 정보는 원래 옮기지 않습니다">
                   <input type="checkbox" checked={opts.strip} onChange={flag('strip')} /> 숨은 정보 지우기
                 </label>
-                <label className="check" title="양식 칸의 값을 그대로 그려 넣고 칸을 없애, 더는 고칠 수 없게 합니다">
-                  <input type="checkbox" checked={opts.flatten} onChange={flag('flatten')} /> 양식 굳히기
+                <label className="check" title="양식 칸의 값과 펜·형광펜·도형 같은 주석을 쪽에 그려 넣어, 더는 고치거나 지울 수 없게 합니다. 메모는 메모로 남습니다">
+                  <input type="checkbox" checked={opts.flatten} onChange={flag('flatten')} /> 양식·주석 굳히기
                 </label>
               </div>
               <label>나누어 저장
@@ -612,7 +635,7 @@ export default function App() {
                       {thumb && <img src={thumb} alt="" draggable={false} />}
                     </div>
                   </div>
-                  {p.overlays?.length > 0 && <span className="decor" title="도장·서명·글상자">꾸밈 {p.overlays.length}</span>}
+                  {p.overlays?.length > 0 && <span className="decor" title="꾸민 것 (도장·글상자·펜·도형·메모 등)">꾸밈 {p.overlays.length}</span>}
                   {src && <span className="badge" title={`${src.name}의 원래 ${p.index + 1}쪽`}>p.{p.index + 1}</span>}
                   <div className="label" title={src?.name}>
                     <b>{i + 1}</b> {src?.name ?? '빈 쪽'}{turned ? ` · ${turned}°` : ''}

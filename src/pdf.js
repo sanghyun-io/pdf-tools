@@ -501,9 +501,11 @@ function decodeText(b) {
 // at, width }] }]. A line's baseline starts at (x, y) and runs along (ux, uy); each word starts `at` points
 // along it and spans `width`; glyphs are `size` tall. One text matrix per line, words moved along it, so
 // readers keep a tilted line together. Render mode 3 with the glyphless font: found and copied, never shown.
-// flatten: form fields painted into their pages and removed. A text field without an appearance stream, or
-// any text field when NeedAppearances says the stored ones may be stale, is drawn with textImage(value) ->
-// pixels when given (the browser draws Korean); without textImage the stored appearance is used, if any.
+// Marks (see MARKS) become annotations of their page.
+// flatten: form fields and annotations painted into their pages and removed (see flattenAnnots). A text
+// field without an appearance stream, or any text field when NeedAppearances says the stored ones may be
+// stale, is drawn with textImage(value) -> pixels when given (the browser draws Korean); without textImage
+// the stored appearance is used, if any.
 async function decorate(out, alloc, pages, { numbers, watermark, flatten, textImage }) {
   const enc = new TextEncoder()
   const stale = out[1].get('AcroForm')?.get('NeedAppearances') === true
@@ -525,7 +527,7 @@ async function decorate(out, alloc, pages, { numbers, watermark, flatten, textIm
   let ocrFont = null
   const textFont = async () => (ocrFont ??= await glyphlessFontObjects(out, alloc))
 
-  for (const [i, { dict, box, view = box, rotate, overlays = [], text }] of pages.entries()) {
+  for (const [i, { slot, dict, box, view = box, rotate, overlays = [], text }] of pages.entries()) {
     const ops = [], xobjects = new Map(), fonts = new Map()
     const at = (rot, body, b = box) => ops.push(`q ${displayMatrix(b, rot).map(num).join(' ')} cm ${body} Q`)
     const place = async (img, rot, x, y, w, h, b = box) => {
@@ -533,7 +535,9 @@ async function decorate(out, alloc, pages, { numbers, watermark, flatten, textIm
       xobjects.set(name, await imageRef(img))
       at(rot, `${num(w)} 0 0 ${num(h)} ${num(x)} ${num(y)} cm /${name} Do`, b)
     }
-    if (flatten) await flattenWidgets(dict, resolve, ops, async (ref, img) => {
+    const marks = overlays.filter((o) => MARKS.has(o.kind))
+    if (marks.length) dict.set('Annots', [...(resolve(dict.get('Annots')) ?? []), ...marks.flatMap((o) => addMark(out, alloc, new Ref(slot), o, box))])
+    if (flatten) await flattenAnnots(dict, resolve, ops, async (ref, img) => {
       const name = `PTFm${xobjects.size}`
       xobjects.set(name, ref ?? await imageRef(img))
       return name
@@ -637,10 +641,15 @@ async function glyphlessFontObjects(out, alloc) {
   return new Ref(font)
 }
 
-// Paints each widget's normal appearance where a viewer would (ISO 32000-2 §12.5.5: the form's BBox, turned
-// by its Matrix, is fitted to the Rect) and takes the widget off the page. Hidden widgets just go.
+// annotations flatten paints; notes (Text, with their Popup) stay, since painting one would lose what it says,
+// and so do links, which do nothing once painted
+const FLATTENED = new Set(['Widget', 'Ink', 'Highlight', 'Underline', 'StrikeOut', 'Squiggly', 'Square', 'Circle', 'Line', 'Polygon', 'PolyLine', 'FreeText', 'Stamp', 'Caret'].map(N))
+
+// Paints each widget's and annotation's normal appearance where a viewer would (ISO 32000-2 §12.5.5: the
+// form's BBox, turned by its Matrix, is fitted to the Rect) and takes it off the page. Hidden ones just go,
+// and so does a widget without a picture; an annotation without one stays, as nothing could draw it.
 // addXObject(ref, pixels) registers an XObject on the page and returns its name. stale: NeedAppearances is set.
-async function flattenWidgets(dict, resolve, ops, addXObject, textImage, stale) {
+async function flattenAnnots(dict, resolve, ops, addXObject, textImage, stale) {
   const annots = resolve(dict.get('Annots'))
   if (!Array.isArray(annots)) return
   const nums = (v) => (Array.isArray(resolve(v)) ? resolve(v).map((x) => Number(resolve(x)) || 0) : null)
@@ -651,7 +660,11 @@ async function flattenWidgets(dict, resolve, ops, addXObject, textImage, stale) 
   const keep = []
   for (const ref of annots) {
     const a = resolve(ref)
-    if (!(a instanceof Map) || a.get('Subtype') !== N('Widget')) {
+    if (!(a instanceof Map) || !FLATTENED.has(a.get('Subtype'))) {
+      keep.push(ref)
+      continue
+    }
+    if (a.get('Subtype') !== N('Widget') && !(resolve(resolve(a.get('AP'))?.get?.('N')) instanceof Stream)) {
       keep.push(ref)
       continue
     }
@@ -683,8 +696,143 @@ async function flattenWidgets(dict, resolve, ops, addXObject, textImage, stale) 
       ops.push(`q ${num(w)} 0 0 ${num(h)} ${num(rx0 + 2)} ${num(ry0 + (ry1 - ry0 - h) / 2)} cm /${name} Do Q`)
     }
   }
-  if (keep.length) dict.set('Annots', keep)
+  // a popup goes with the annotation it belonged to
+  const gone = new Set(annots.filter((ref) => !keep.includes(ref)).map(resolve))
+  const left = keep.filter((ref) => !(resolve(ref)?.get?.('Subtype') === N('Popup') && gone.has(resolve(resolve(ref).get('Parent')))))
+  if (left.length) dict.set('Annots', left)
   else dict.delete('Annots')
+}
+
+// ---- marks: the page editor's pen, highlighter, underline, strike-out, shapes and notes ----
+// Written as pdf.js's editor writes its own (src/core/annotation.js, Apache-2.0, read with REA): a standard
+// annotation plus a normal appearance drawn in the page's own space, so viewers show the same thing and a
+// reader can still move or delete it. flatten paints them into the page like form fields (flattenAnnots).
+//
+// A mark is an overlay (x, y, w, h, rot as for stamps) with kind and color '#rrggbb', and inside its box
+// (u, v: 0..1 from the box's top-left): ink { lines: [[u, v, u, v, ...]], width, opacity, marker },
+// highlight | underline | strikeout { rects: [[u, v, w, h]] } (one per line of text, read left to right),
+// square | circle { width, fill }, line | arrow { ends: [u1, v1, u2, v2], width }, note { text }.
+export const MARKS = new Set(['ink', 'highlight', 'underline', 'strikeout', 'square', 'circle', 'line', 'arrow', 'note'])
+const NOTE_SIZE = 20 // pt, a note's icon
+const rgbOf = (hex) => [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255)
+const paint = (hex, op) => `${rgbOf(hex).map(num).join(' ')} ${op}`
+const pt = ([x, y]) => `${num(x)} ${num(y)}`
+const textString = (s) => new Str(Uint8Array.from([0xfe, 0xff, ...Array.from({ length: s.length }, (_, i) => s.charCodeAt(i)).flatMap((u) => [u >> 8, u & 255])])) // UTF-16BE
+
+// pdf.js's pen smoothing (Outline.createBezierPoints): each point bends the line toward the next one.
+function smoothPath(p) {
+  const ops = [`${pt(p[0])} m`]
+  if (p.length < 3) return [...ops, `${pt(p.at(-1))} l`] // a dot (round cap) or a straight stroke
+  for (let i = 2; i < p.length; i++) {
+    const [a, b, c] = [p[i - 2], p[i - 1], p[i]]
+    ops.push(`${pt([(a[0] + 5 * b[0]) / 6, (a[1] + 5 * b[1]) / 6])} ${pt([(5 * b[0] + c[0]) / 6, (5 * b[1] + c[1]) / 6])} ${pt([(b[0] + c[0]) / 2, (b[1] + c[1]) / 2])} c`)
+  }
+  return [...ops, `${pt(p.at(-1))} l`] // pdf.js stops halfway to the last point
+}
+
+// o: a mark; at(u, v): a point of its box in the page's own space.
+// Returns { fields, rect, ops, gs, bbox? }: the annotation's entries, its Rect, the appearance drawn in page
+// space (or in its own bbox), and the ExtGState it needs (opacity, multiply) or null.
+function markAnnotation(o, at) {
+  const ops = [], fields = [['C', rgbOf(o.color)]]
+  let gs = null, pad = 1
+  const quads = o.rects?.map(([u, v, w, h]) => [at(u, v), at(u + w, v), at(u, v + h), at(u + w, v + h)]) // UL UR LL LR
+  const along = (q, f) => [[q[2][0] + (q[0][0] - q[2][0]) * f, q[2][1] + (q[0][1] - q[2][1]) * f], [q[3][0] + (q[1][0] - q[3][0]) * f, q[3][1] + (q[1][1] - q[3][1]) * f]]
+  let points = quads?.flat() ?? []
+  switch (o.kind) {
+    case 'ink': {
+      const lines = o.lines.map((l) => Array.from({ length: l.length / 2 }, (_, k) => at(l[2 * k], l[2 * k + 1])))
+      ops.push(`${num(o.width)} w 1 J 1 j`, paint(o.color, 'RG'), ...lines.flatMap(smoothPath), 'S')
+      fields.push(['Subtype', N('Ink')], ['InkList', lines.map((p) => p.flat())], ['BS', new Map([['W', o.width]])])
+      if (o.marker) fields.push(['IT', N('InkHighlight')]) // how Edge and Acrobat tell a free highlight
+      if (o.marker || o.opacity < 1) gs = new Map([['CA', o.opacity ?? 1], ...(o.marker ? [['BM', N('Multiply')]] : [])])
+      if (o.opacity < 1) fields.push(['CA', o.opacity])
+      points = lines.flat()
+      pad = o.width + 1 // half a stroke would do; pdf.js distrusts a border width over half the Rect
+      break
+    }
+    case 'highlight':
+      ops.push(paint(o.color, 'rg'), ...quads.map((q) => `${pt(q[0])} m ${pt(q[1])} l ${pt(q[3])} l ${pt(q[2])} l h`), 'f')
+      gs = new Map([['BM', N('Multiply')]])
+      fields.push(['Subtype', N('Highlight')], ['QuadPoints', quads.flat(2)])
+      break
+    case 'underline':
+    case 'strikeout':
+      ops.push(paint(o.color, 'RG'), ...quads.map((q) => {
+        const tall = Math.hypot(q[0][0] - q[2][0], q[0][1] - q[2][1])
+        const [a, b] = along(q, o.kind === 'underline' ? 0.08 : 0.45)
+        return `${num(Math.max(0.5, tall * 0.07))} w ${pt(a)} m ${pt(b)} l S`
+      }))
+      fields.push(['Subtype', N(o.kind === 'underline' ? 'Underline' : 'StrikeOut')], ['QuadPoints', quads.flat(2)])
+      break
+    case 'square':
+    case 'circle': {
+      const [a, b] = [at(0, 0), at(1, 1)], hw = o.width / 2
+      const [x0, y0, x1, y1] = [Math.min(a[0], b[0]) + hw, Math.min(a[1], b[1]) + hw, Math.max(a[0], b[0]) - hw, Math.max(a[1], b[1]) - hw]
+      ops.push(`${num(o.width)} w`, paint(o.color, 'RG'))
+      if (o.fill) ops.push(paint(o.fill, 'rg'))
+      if (o.kind === 'square') ops.push(`${pt([x0, y0])} ${num(x1 - x0)} ${num(y1 - y0)} re`)
+      else { // four Béziers, as pdf.js draws a circle annotation without appearance
+        const k = (4 / 3) * Math.tan(Math.PI / 8), [mx, my, rx, ry] = [(x0 + x1) / 2, (y0 + y1) / 2, (x1 - x0) / 2, (y1 - y0) / 2]
+        ops.push(`${pt([mx, y1])} m`, `${pt([mx + rx * k, y1])} ${pt([x1, my + ry * k])} ${pt([x1, my])} c`, `${pt([x1, my - ry * k])} ${pt([mx + rx * k, y0])} ${pt([mx, y0])} c`,
+          `${pt([mx - rx * k, y0])} ${pt([x0, my - ry * k])} ${pt([x0, my])} c`, `${pt([x0, my + ry * k])} ${pt([mx - rx * k, y1])} ${pt([mx, y1])} c h`)
+      }
+      ops.push(o.fill ? 'B' : 'S')
+      fields.push(['Subtype', N(o.kind === 'square' ? 'Square' : 'Circle')], ['BS', new Map([['W', o.width]])])
+      if (o.fill) fields.push(['IC', rgbOf(o.fill)])
+      points = [a, b]
+      break
+    }
+    case 'line':
+    case 'arrow': {
+      const [a, b] = [at(o.ends[0], o.ends[1]), at(o.ends[2], o.ends[3])]
+      ops.push(`${num(o.width)} w 1 J 1 j`, paint(o.color, 'RG'), `${pt(a)} m ${pt(b)} l S`)
+      points = [a, b]
+      pad = o.width + 1 // half a stroke would do; pdf.js distrusts a border width over half the Rect
+      if (o.kind === 'arrow') { // an open arrowhead at the end, 30° each side
+        const len = Math.max(8, o.width * 4), d = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1, [ux, uy] = [(a[0] - b[0]) / d, (a[1] - b[1]) / d]
+        const wing = (s) => [b[0] + len * (ux * Math.cos(s) - uy * Math.sin(s)), b[1] + len * (ux * Math.sin(s) + uy * Math.cos(s))]
+        ops.push(`${pt(wing(Math.PI / 6))} m ${pt(b)} l ${pt(wing(-Math.PI / 6))} l S`)
+        pad += len
+      }
+      fields.push(['Subtype', N('Line')], ['L', [...a, ...b]], ['BS', new Map([['W', o.width]])], ['LE', [N('None'), N(o.kind === 'arrow' ? 'OpenArrow' : 'None')]])
+      break
+    }
+    case 'note': { // pinned by its top-left corner and drawn upright whatever the page's rotation (NoRotate)
+      const [x, y] = at(0, 0), s = NOTE_SIZE
+      // a speech bubble in its own 20 x 20 space
+      ops.push('1 w 1 j 0.25 0.25 0.25 RG', paint(o.color, 'rg'), '1.5 18.5 m 18.5 18.5 l 18.5 5.5 l 10 5.5 l 4 1.5 l 5 5.5 l 1.5 5.5 l h B',
+        '4.5 14.5 m 15.5 14.5 l 4.5 12 m 15.5 12 l 4.5 9.5 m 11.5 9.5 l S')
+      fields.push(['Subtype', N('Text')], ['Name', N('Comment')], ['Contents', textString(o.text ?? '')], ['Open', false])
+      return { fields, rect: [x, y - s, x + s, y], ops, gs, bbox: [0, 0, s, s], flags: 4 | 8 | 16 } // Print, NoZoom, NoRotate
+    }
+  }
+  const xs = points.map((p) => p[0]), ys = points.map((p) => p[1])
+  return { fields, rect: [Math.min(...xs) - pad, Math.min(...ys) - pad, Math.max(...xs) + pad, Math.max(...ys) + pad], ops, gs }
+}
+
+// Adds a mark to the page as an annotation with its appearance (and a popup for a note); returns the refs.
+function addMark(out, alloc, pageRef, o, box) {
+  const enc = new TextEncoder()
+  const m = displayMatrix(box, o.rot), [W, H] = displaySize(box, o.rot)
+  const at = (u, v) => { // box fraction -> page as shown (points from the bottom-left) -> page space
+    const X = (o.x + u * o.w) * W, Y = (1 - o.y - v * o.h) * H
+    return [m[0] * X + m[2] * Y + m[4], m[1] * X + m[3] * Y + m[5]]
+  }
+  const { fields, rect, ops, gs, bbox = rect, flags = 4 } = markAnnotation(o, at)
+  const ap = alloc()
+  out[ap] = new Stream(new Map([['Type', N('XObject')], ['Subtype', N('Form')], ['BBox', bbox.map((v) => Math.round(v * 1000) / 1000)],
+    ['Resources', new Map(gs ? [['ExtGState', new Map([['GS0', new Map([['Type', N('ExtGState')], ...gs])]])]] : [])]]),
+  enc.encode(`${gs ? '/GS0 gs\n' : ''}${ops.join('\n')}`))
+  const date = new Str(enc.encode(`D:${new Date().toISOString().replace(/[-:T]|\.\d+/g, '').slice(0, 14)}Z`))
+  const annot = alloc()
+  out[annot] = new Map([['Type', N('Annot')], ...fields, ['Rect', rect.map((v) => Math.round(v * 1000) / 1000)], ['F', flags], ['P', pageRef],
+    ['CreationDate', date], ['M', date], ['AP', new Map([['N', new Ref(ap)]])]])
+  if (o.kind !== 'note') return [new Ref(annot)]
+  const popup = alloc()
+  out[popup] = new Map([['Type', N('Annot')], ['Subtype', N('Popup')], ['Rect', [rect[2], rect[3] - 120, rect[2] + 200, rect[3]]], ['Parent', new Ref(annot)], ['Open', false], ['F', 28]])
+  out[annot].set('Popup', new Ref(popup))
+  return [new Ref(annot), new Ref(popup)]
 }
 
 // parts: [{ doc, index, rotate, overlays?, crop?, text? } | { size: [w, h], rotate, overlays? }] in output order.
@@ -772,7 +920,8 @@ export async function buildPdf(parts, { level, gray, numbers, watermark, flatten
     const box = size ? [0, 0, ...size] : pageBox(doc, index)
     return { slot: slots[i], dict: out[slots[i]], box, view: crop ?? box, rotate: out[slots[i]].get('Rotate'), overlays, text }
   })
-  await decorate(out, alloc, pages, { numbers, watermark, flatten, textImage })
+  // sheets of several pages are drawn from the pages' contents, so what should show of fields and marks is painted in first
+  await decorate(out, alloc, pages, { numbers, watermark, flatten: flatten || !!per, textImage })
   if (per) await impose(out, alloc, pages, per)
   if (strip) stripHidden(out)
   if (level) await optimize(out)
@@ -802,7 +951,7 @@ async function pageForm(out, page) {
 
 // per 2: two pages side by side on landscape A4 (wide pages: one above the other on portrait A4); per 4: two
 // by two on portrait A4; per 1: each page fitted to A4 in its own orientation. Pages keep the rotation they are shown with. Bookmarks move to the sheets;
-// links and form fields don't survive being drawn as pictures of pages.
+// links and notes don't survive being drawn as pictures of pages (fields and other annotations are painted in first).
 async function impose(out, alloc, pages, per) {
   const [aw, ah] = A4, margin = per === 1 ? 0 : 18, gap = 12
   const enc = new TextEncoder()

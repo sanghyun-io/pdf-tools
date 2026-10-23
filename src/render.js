@@ -1,7 +1,7 @@
 // Drawing pages as pictures (thumbnails, the page editor, "save as images") is the one job left to pdf.js.
 // Reading and writing PDFs stays in pdf.js (ours).
 // legacy build: polyfills Promise.try & co., which iOS before 18.2 and older WebViews lack (+57 KB)
-import { getDocument, GlobalWorkerOptions, PDFWorker } from 'pdfjs-dist/legacy/build/pdf.mjs'
+import { getDocument, GlobalWorkerOptions, PDFWorker, TextLayer } from 'pdfjs-dist/legacy/build/pdf.mjs'
 import workerUrl from 'pdfjs-dist/legacy/build/pdf.worker.min.mjs?url'
 
 // The single-file build is opened from disk (file://), where a page can start only a classic worker from a blob:
@@ -37,15 +37,22 @@ export async function openPages(bytes, password) {
   }
   return {
     count: doc.numPages,
+    // canvas.black: still pure black after a second try (a lost page, or one that really is black)
     async draw(i, scale, rotation = null) {
       const page = await doc.getPage(i + 1)
       const turn = rotation ?? page.rotate
       const { width, height } = page.getViewport({ scale: 1, rotation: turn })
       const viewport = page.getViewport({ scale: scale(width, height), rotation: turn })
-      const canvas = document.createElement('canvas')
-      canvas.width = Math.ceil(viewport.width)
-      canvas.height = Math.ceil(viewport.height)
-      await page.render({ canvas, viewport }).promise
+      let canvas
+      for (let tries = 0; tries < 2; tries++) {
+        if (canvas) canvas.width = 0 // hand the lost one's memory back
+        canvas = document.createElement('canvas')
+        canvas.width = Math.ceil(viewport.width)
+        canvas.height = Math.ceil(viewport.height)
+        await page.render({ canvas, viewport }).promise
+        canvas.black = allBlack(canvas)
+        if (!canvas.black) break
+      }
       page.cleanup()
       return canvas
     },
@@ -54,8 +61,32 @@ export async function openPages(bytes, password) {
       const { items } = await (await doc.getPage(i + 1)).getTextContent()
       return items.some((t) => t.str.trim())
     },
+    // The page's text as pdf.js's selectable text layer (see .textLayer in index.css), for marking text.
+    // container: an empty element over a picture of the page as shown turned by `rotation`; it is sized by
+    // its --total-scale-factor (px per point), so it follows the picture's size. scale: px per point to
+    // measure text at. false when the page has no text.
+    async textLayer(i, rotation, container, scale) {
+      const page = await doc.getPage(i + 1)
+      const textContentSource = await page.getTextContent()
+      if (!textContentSource.items.some((t) => t.str.trim())) return false
+      await new TextLayer({ textContentSource, container, viewport: page.getViewport({ scale, rotation }) }).render()
+      return true
+    },
     close,
   }
+}
+
+// pdf.js paints the page white before anything else, on a canvas without transparency, so a page that comes
+// out pure black everywhere was most likely lost by the browser: a user once got a redacted page saved all
+// black, and the same steps came out fine every time after. Read in strips: a real page shows a non-black
+// pixel in the first one, so only a black page costs a full read.
+function allBlack(canvas) {
+  const ctx = canvas.getContext('2d')
+  for (let y = 0; y < canvas.height; y += 64) {
+    const px = ctx.getImageData(0, y, canvas.width, Math.min(64, canvas.height - y)).data
+    for (let k = 0; k < px.length; k += 4) if (px[k] | px[k + 1] | px[k + 2]) return false
+  }
+  return true
 }
 
 // Draws pages one at a time and hands each canvas to onPage(index, canvas). pages: 0-based (default all).

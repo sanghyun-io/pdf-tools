@@ -11,6 +11,17 @@ export function turnBox(b, n) {
   for (let i = 0; i < n; i++) b = { x: 1 - b.y - b.h, y: b.x, w: b.h, h: b.w }
   return b
 }
+// a mark (see MARKS in pdf.js) turned the same way: its box, and the points and boxes inside it
+export function turnMark(o, n) {
+  const point = (l) => l.map((_, k) => (k % 2 ? l[k - 1] : 1 - l[k + 1])) // (u, v) -> (1 - v, u)
+  for (let i = 0; i < n; i++) {
+    o = { ...o, ...turnBox(o, 1) }
+    if (o.lines) o.lines = o.lines.map(point)
+    if (o.ends) o.ends = point(o.ends)
+    if (o.rects) o.rects = o.rects.map(([u, v, w, h]) => [1 - v - h, u, h, w])
+  }
+  return o
+}
 
 async function pixels(canvas) {
   const { width, height } = canvas
@@ -47,10 +58,12 @@ export async function imagePixels(file, { maxSide = 1600, opacity = 1, clearWhit
 }
 
 const FONT = '"Malgun Gothic", "Apple SD Gothic Neo", "Noto Sans KR", sans-serif'
+// a name written as a signature: handwriting-like fonts a PC may have, else the browser's cursive
+export const SIGN_FONT = '"Nanum Pen Script", "Nanum Brush Script", "Segoe Script", "Gungsuh", cursive'
 
 // text, size in points; lines split on \n; turned `angle` degrees counterclockwise
-export async function textPixels(text, { size = 12, color = '#000000', opacity = 1, angle = 0, bold = false } = {}) {
-  const px = size * PX_PER_PT, font = `${bold ? 'bold ' : ''}${px}px ${FONT}`, lineH = px * 1.35
+export async function textPixels(text, { size = 12, color = '#000000', opacity = 1, angle = 0, bold = false, family = FONT } = {}) {
+  const px = size * PX_PER_PT, font = `${bold ? 'bold ' : ''}${px}px ${family}`, lineH = px * 1.35
   const lines = text.split('\n')
   const measure = new OffscreenCanvas(1, 1).getContext('2d')
   measure.font = font

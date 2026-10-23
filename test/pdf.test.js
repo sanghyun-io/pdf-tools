@@ -13,6 +13,7 @@ import { loadModel } from '../src/ocr/model.js'
 import { recognizeLine } from '../src/ocr/recognize.js'
 import { recognizePage } from '../src/ocr/page.js'
 import { inAppBrowser } from '../src/inapp.js'
+import { turnMark } from '../src/decor.js'
 
 const fixture = (name) => new Uint8Array(readFileSync(new URL(`fixtures/${name}`, import.meta.url)))
 const latin1 = (s) => Uint8Array.from(s, (c) => c.charCodeAt(0))
@@ -252,6 +253,76 @@ test('watermark centered on every page; a stamp stays where it was put and turns
   }
   // each picture is stored once however many pages use it
   assert.equal((new TextDecoder().decode(bytes).match(/\/Subtype \/Image/g) ?? []).length, 4) // 2 pictures + 2 masks
+})
+
+// one of each mark the page editor makes (boxes in the page as shown when marked, see MARKS in pdf.js)
+const MARK_SET = [
+  { kind: 'ink', x: 0.1, y: 0.1, w: 0.2, h: 0.1, lines: [[0, 0, 0.5, 1, 1, 0]], width: 2, color: '#1d4ed8' },
+  { kind: 'ink', x: 0.1, y: 0.25, w: 0.2, h: 0.05, lines: [[0, 0.5, 1, 0.5]], width: 12, color: '#fde047', marker: true },
+  { kind: 'highlight', x: 0.3, y: 0.5, w: 0.4, h: 0.02, rects: [[0, 0, 1, 1]], color: '#fde047' },
+  { kind: 'underline', x: 0.3, y: 0.55, w: 0.4, h: 0.04, rects: [[0, 0, 0.6, 0.5], [0, 0.5, 1, 0.5]], color: '#c62828' }, // two lines
+  { kind: 'strikeout', x: 0.3, y: 0.6, w: 0.4, h: 0.02, rects: [[0, 0, 1, 1]], color: '#000000' },
+  { kind: 'square', x: 0.6, y: 0.1, w: 0.2, h: 0.1, width: 2, color: '#c62828', fill: '#ffeeee' },
+  { kind: 'circle', x: 0.6, y: 0.25, w: 0.2, h: 0.1, width: 1, color: '#15803d' },
+  { kind: 'line', x: 0.1, y: 0.7, w: 0.3, h: 0.1, ends: [0, 0, 1, 1], width: 2, color: '#000000' },
+  { kind: 'arrow', x: 0.5, y: 0.7, w: 0.3, h: 0.1, ends: [0, 1, 1, 0], width: 2, color: '#1d4ed8' },
+  { kind: 'note', x: 0.05, y: 0.9, w: 20 / 594.96, h: 20 / 841.92, text: '메모 내용 😀', color: '#fde047' },
+].map((m) => ({ ...m, rot: 0 }))
+const SUBTYPES = ['Ink', 'Ink', 'Highlight', 'Underline', 'StrikeOut', 'Square', 'Circle', 'Line', 'Line', 'Text']
+
+test('marks become annotations with pictures where they were put, turning with their page', async () => {
+  const doc = await readPdf(fixture('chrome.pdf'))
+  const { bytes } = await buildPdf([
+    { doc, index: 0, rotate: 0, overlays: MARK_SET },
+    { doc, index: 1, rotate: 90, overlays: MARK_SET }, // turned after marking
+  ])
+  const pages = await eachPage(bytes, async (page) => {
+    const vp = page.getViewport({ scale: 1, rotation: 0 }) // the page as it was when marked
+    return (await page.getAnnotations()).filter((a) => !['Popup', 'Link'].includes(a.subtype)).map((a) => { // the file has links of its own
+      const [x0, y0] = apply(vp.transform, a.rect[0], a.rect[1]), [x1, y1] = apply(vp.transform, a.rect[2], a.rect[3])
+      return { a, box: [Math.min(x0, x1) / vp.width, Math.min(y0, y1) / vp.height, Math.max(x0, x1) / vp.width, Math.max(y0, y1) / vp.height] }
+    })
+  })
+  for (const marks of pages) {
+    assert.deepEqual(marks.map((m) => m.a.subtype), SUBTYPES)
+    marks.forEach(({ a, box }, i) => {
+      const o = MARK_SET[i]
+      assert.ok(a.hasAppearance, `${a.subtype} has a picture`)
+      // the drawn box is the mark's box, give or take half a stroke and an arrowhead
+      if (o.kind === 'note') return
+      for (const [k, v] of [o.x, o.y, o.x + o.w, o.y + o.h].entries()) assert.ok(Math.abs(box[k] - v) < 0.025, `${a.subtype} ${i} edge ${k}: ${box} vs ${o.x},${o.y},${o.w},${o.h}`)
+    })
+    const note = marks.at(-1).a
+    assert.equal(note.contentsObj.str, '메모 내용 😀')
+    near(marks.at(-1).box.slice(0, 2), [0.05, 0.9], 'note pinned by its top-left')
+    assert.equal(marks[2].a.quadPoints.length, 8)
+  }
+})
+
+test('a mark turned with its page keeps its points where the page puts them', () => {
+  const mark = { x: 0.1, y: 0.2, w: 0.4, h: 0.3, ends: [0, 0.25, 1, 1], lines: [[0.5, 0.5, 1, 0]], rects: [[0, 0, 0.5, 0.2]] }
+  const abs = (o, u, v) => [o.x + u * o.w, o.y + v * o.h]
+  const turned = turnMark(mark, 1)
+  // a quarter turn clockwise moves the page point (x, y) to (1 - y, x)
+  for (const [u, v, tu, tv] of [[0, 0.25, ...turned.ends.slice(0, 2)], [1, 1, ...turned.ends.slice(2)], [1, 0, ...turned.lines[0].slice(2)]]) {
+    const [x, y] = abs(mark, u, v)
+    near(abs(turned, tu, tv), [1 - y, x], 'point')
+  }
+  const [ru, rv, rw, rh] = turned.rects[0], [x0, y0] = abs(mark, 0, 0), [x1, y1] = abs(mark, 0.5, 0.2)
+  near([turned.x + ru * turned.w, turned.y + rv * turned.h, rw * turned.w, rh * turned.h], [1 - y1, x0, y1 - y0, x1 - x0], 'text box')
+  const flat = (o) => [o.x, o.y, o.w, o.h, ...o.ends, ...o.lines.flat(), ...o.rects.flat()]
+  near(flat(turnMark(mark, 4)), flat(mark), 'four quarter turns')
+})
+
+test('flatten paints marks into the page; notes stay notes', async () => {
+  const doc = await readPdf(fixture('chrome.pdf'))
+  const { bytes } = await buildPdf([{ doc, index: 0, rotate: 0, overlays: MARK_SET }], { flatten: true })
+  const [{ subtypes, forms }] = await eachPage(bytes, async (page) => ({
+    subtypes: (await page.getAnnotations()).map((a) => a.subtype).filter((s) => s !== 'Link'),
+    forms: (await page.getOperatorList()).fnArray.filter((fn) => fn === OPS.paintFormXObjectBegin).length,
+  }))
+  assert.deepEqual(subtypes.sort(), ['Popup', 'Text'])
+  assert.ok(forms >= MARK_SET.length - 1, `painted ${forms}`)
 })
 
 test('encrypts with AES-256: pdf.js and our reader need the password; the owner password opens it too', async () => {

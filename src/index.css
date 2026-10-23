@@ -226,6 +226,44 @@ header a { color: var(--accent); }
 .editor .item:not(.active) .handle { display: none; }
 .editor .actions { display: flex; gap: 8px; align-items: center; justify-content: flex-end; margin: 0; }
 .editor .actions .muted { margin-right: auto; }
+.editor-tools .tools { display: flex; flex-wrap: wrap; gap: 4px; }
+.editor-tools .tools button, .signature .tabs button { padding: 6px 10px; }
+button[aria-pressed="true"] { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+.editor-tools textarea.note-text { flex: 1 1 260px; }
+/* marks: drawn over the page picture; the highlighters darken it as ink would (multiply) */
+.editor .item svg { position: absolute; inset: 0; overflow: visible; pointer-events: none; }
+.editor .item.highlight, .editor .item.marker, .editor .draft.marker { mix-blend-mode: multiply; }
+.editor .item:is(.square, .circle) { box-sizing: border-box; }
+.editor .item.circle { border-radius: 50%; }
+.editor .item:is(.highlight, .underline, .strikeout) { cursor: pointer; }
+.editor .item:is(.ink, .line, .arrow, .highlight, .underline, .strikeout, .square, .circle, .note):not(.active) { outline-color: transparent; }
+.editor .paper:is(.drawing, .picking) .item { pointer-events: none; }
+.editor .paper .draw { position: absolute; inset: 0; z-index: 3; cursor: crosshair; }
+.editor .paper .draft { position: absolute; inset: 0; z-index: 4; pointer-events: none; overflow: visible; }
+.editor .paper.picking .textLayer { pointer-events: auto; z-index: 3; }
+/* pdf.js's text layer, from pdfjs-dist web/pdf_viewer.css (Apache-2.0): just what picking text needs */
+.textLayer {
+  position: absolute; inset: 0; overflow: clip; opacity: 1; line-height: 1; text-align: initial; transform-origin: 0 0;
+  pointer-events: none;
+  --scale-round-x: 1px; --scale-round-y: 1px; --min-font-size: 1;
+  --text-scale-factor: calc(var(--total-scale-factor) * var(--min-font-size)); --min-font-size-inv: calc(1 / var(--min-font-size));
+}
+.textLayer :is(span, br) { color: transparent; position: absolute; white-space: pre; cursor: text; transform-origin: 0% 0%; user-select: text; }
+.textLayer > :not(.markedContent), .textLayer .markedContent span:not(.markedContent) {
+  z-index: 1; --font-height: 0; font-size: calc(var(--text-scale-factor) * var(--font-height));
+  --scale-x: 1; --rotate: 0deg; transform: rotate(var(--rotate)) scaleX(var(--scale-x)) scale(var(--min-font-size-inv));
+}
+.textLayer .markedContent { display: contents; }
+.textLayer ::selection { background: rgb(37 99 235 / 0.3); color: transparent; }
+.textLayer br::selection { background: transparent; }
+.textLayer[data-main-rotation="90"] { transform: rotate(90deg) translateY(-100%); }
+.textLayer[data-main-rotation="180"] { transform: rotate(180deg) translate(-100%, -100%); }
+.textLayer[data-main-rotation="270"] { transform: rotate(270deg) translateX(-100%); }
+.modal.signature[open] { width: min(560px, calc(100vw - 32px)); box-sizing: border-box; }
+.signature .tabs, .signature .kept { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.signature .pad { display: block; width: 100%; height: auto; background: #fff; border: 1px solid var(--line); border-radius: 8px; touch-action: none; cursor: crosshair; }
+.signature input.name { font-size: 36px; }
+.signature .kept button { display: flex; align-items: center; height: 48px; font-size: 20px; }
 
 @media (max-width: 600px) {
   .toolbar { position: static; } /* two wrapped rows would cover a third of a phone screen */
