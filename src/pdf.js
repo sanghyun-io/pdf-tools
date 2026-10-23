@@ -535,6 +535,27 @@ async function decorate(out, alloc, pages, { numbers, watermark, flatten, textIm
     if (!embedded.has(key)) embedded.set(key, [`PTF${embedded.size}`, await embedFont(out, alloc, await book.data(key), embedded.size)])
     return embedded.get(key)
   }
+  // Drawing steps (boxDrawing in decor.js) as content, for a box whose top-left is (X, T) as shown; the
+  // pictures and fonts they use are added to the xobjects and fonts given (a page's, or an appearance's).
+  const drawing = async (draw, X, T, xobjects, fonts) => {
+    const p = (x, y) => `${num(X + x)} ${num(T - y)}` // points from the box's top-left, y down -> as shown
+    const body = []
+    for (const d of draw) {
+      if (d.fill) body.push(`${paint(d.fill, 'rg')} ${p(d.x, d.y + d.h)} ${num(d.w)} ${num(d.h)} re f`)
+      else if (d.stroke) body.push(`${num(d.width)} w ${paint(d.stroke, 'RG')} ${d.segments.map(([a, b, c, e]) => `${p(a, b)} m ${p(c, e)} l`).join(' ')} S`)
+      else if (d.image) {
+        const name = `PTIm${xobjects.size}`
+        xobjects.set(name, await imageRef(d.image))
+        body.push(`q ${num(d.w)} 0 0 ${num(d.h)} ${p(d.x, d.y + d.h)} cm /${name} Do Q`)
+      } else if (d.text) {
+        const [name, ref] = await fontRef(d.font)
+        fonts.set(name, ref)
+        const bolder = d.bold ? ` 2 Tr ${num(d.size * 0.03)} w ${paint(d.color, 'RG')}` : '' // no bold face: filled and outlined
+        body.push(`q BT /${name} ${num(d.size)} Tf ${paint(d.color, 'rg')}${bolder} ${p(d.x, d.y)} Td <${d.text.map((g) => g.toString(16).padStart(4, '0')).join('')}> Tj ET Q`)
+      }
+    }
+    return body.join('\n')
+  }
 
   for (const [i, { slot, dict, box, view = box, rotate, overlays = [], text }] of pages.entries()) {
     const ops = [], xobjects = new Map(), fonts = new Map()
@@ -545,7 +566,11 @@ async function decorate(out, alloc, pages, { numbers, watermark, flatten, textIm
       at(rot, `${num(w)} 0 0 ${num(h)} ${num(x)} ${num(y)} cm /${name} Do`, b)
     }
     const marks = overlays.filter((o) => MARKS.has(o.kind))
-    if (marks.length) dict.set('Annots', [...(resolve(dict.get('Annots')) ?? []), ...marks.flatMap((o) => addMark(out, alloc, new Ref(slot), o, box))])
+    if (marks.length) {
+      const added = []
+      for (const o of marks) added.push(await addMark(out, alloc, new Ref(slot), o, box, drawing))
+      dict.set('Annots', [...(resolve(dict.get('Annots')) ?? []), ...added])
+    }
     if (flatten) await flattenAnnots(dict, resolve, ops, async (ref, img) => {
       const name = `PTFm${xobjects.size}`
       xobjects.set(name, ref ?? await imageRef(img))
@@ -584,24 +609,8 @@ async function decorate(out, alloc, pages, { numbers, watermark, flatten, textIm
     }
     for (const o of overlays) {
       if (o.kind === 'vector') { // a text box or table drawn: real text in an embedded font, lines, fills, pictures
-        const [W, H] = displaySize(box, o.rot), X = o.x * W, T = (1 - o.y) * H
-        const p = (x, y) => `${num(X + x)} ${num(T - y)}` // points from the box's top-left, y down -> as shown
-        const body = []
-        for (const d of o.draw) {
-          if (d.fill) body.push(`${paint(d.fill, 'rg')} ${p(d.x, d.y + d.h)} ${num(d.w)} ${num(d.h)} re f`)
-          else if (d.stroke) body.push(`${num(d.width)} w ${paint(d.stroke, 'RG')} ${d.segments.map(([a, b, c, e]) => `${p(a, b)} m ${p(c, e)} l`).join(' ')} S`)
-          else if (d.image) {
-            const name = `PTIm${xobjects.size}`
-            xobjects.set(name, await imageRef(d.image))
-            body.push(`q ${num(d.w)} 0 0 ${num(d.h)} ${p(d.x, d.y + d.h)} cm /${name} Do Q`)
-          } else if (d.text) {
-            const [name, ref] = await fontRef(d.font)
-            fonts.set(name, ref)
-            const bolder = d.bold ? ` 2 Tr ${num(d.size * 0.03)} w ${paint(d.color, 'RG')}` : '' // no bold face: filled and outlined
-            body.push(`q BT /${name} ${num(d.size)} Tf ${paint(d.color, 'rg')}${bolder} ${p(d.x, d.y)} Td <${d.text.map((g) => g.toString(16).padStart(4, '0')).join('')}> Tj ET Q`)
-          }
-        }
-        at(o.rot, body.join('\n'))
+        const [W, H] = displaySize(box, o.rot)
+        at(o.rot, await drawing(o.draw, o.x * W, (1 - o.y) * H, xobjects, fonts))
         continue
       }
       if (!o.image) continue // redaction boxes: App burns those into a picture of the page
@@ -892,28 +901,37 @@ function markAnnotation(o, at) {
   return { fields, rect: [Math.min(...xs) - pad, Math.min(...ys) - pad, Math.max(...xs) + pad, Math.max(...ys) + pad], ops, gs }
 }
 
-// Adds a mark to the page as an annotation with its appearance (and a popup for a note); returns the refs.
-function addMark(out, alloc, pageRef, o, box) {
+// Adds a mark to the page as an annotation with its appearance; returns its ref. A note has no Popup of its
+// own: readers open one from the note (Acrobat, pdf.js). Chrome opens one too but writes it in a font
+// without Korean, so a note can be spread (o.spread: drawing steps from noteDrawing in decor.js): a
+// FreeText annotation whose appearance shows the text itself, drawn with drawing() from decorate.
+async function addMark(out, alloc, pageRef, o, box, drawing) {
   const enc = new TextEncoder()
+  const round = (v) => Math.round(v * 1000) / 1000
   const m = displayMatrix(box, o.rot), [W, H] = displaySize(box, o.rot)
-  const at = (u, v) => { // box fraction -> page as shown (points from the bottom-left) -> page space
-    const X = (o.x + u * o.w) * W, Y = (1 - o.y - v * o.h) * H
-    return [m[0] * X + m[2] * Y + m[4], m[1] * X + m[3] * Y + m[5]]
+  const page = (X, Y) => [m[0] * X + m[2] * Y + m[4], m[1] * X + m[3] * Y + m[5]] // as shown -> page space
+  const at = (u, v) => page((o.x + u * o.w) * W, (1 - o.y - v * o.h) * H) // a point of the box
+  const date = new Str(enc.encode(`D:${new Date().toISOString().replace(/[-:T]|\.\d+/g, '').slice(0, 14)}Z`))
+  const ap = alloc(), annot = alloc()
+  if (o.kind === 'note' && o.spread) {
+    const X = o.x * W, T = (1 - o.y) * H, bbox = [X, T - o.h * H, X + o.w * W, T]
+    const xobjects = new Map(), fonts = new Map(), body = await drawing(o.spread, X, T, xobjects, fonts)
+    // the appearance is drawn as shown; its Matrix turns it into page space, as the stamps are
+    out[ap] = new Stream(new Map([['Type', N('XObject')], ['Subtype', N('Form')], ['BBox', bbox.map(round)], ['Matrix', m],
+      ['Resources', new Map([...(xobjects.size ? [['XObject', xobjects]] : []), ...(fonts.size ? [['Font', fonts]] : [])])]]), enc.encode(body))
+    const corners = [page(bbox[0], bbox[1]), page(bbox[2], bbox[3])]
+    const rect = [Math.min(corners[0][0], corners[1][0]), Math.min(corners[0][1], corners[1][1]), Math.max(corners[0][0], corners[1][0]), Math.max(corners[0][1], corners[1][1])]
+    out[annot] = new Map([['Type', N('Annot')], ['Subtype', N('FreeText')], ['Contents', textString(o.text ?? '')], ['DA', new Str(enc.encode('/Helv 10 Tf 0 g'))],
+      ['C', rgbOf(o.color)], ['Rect', rect.map(round)], ['F', 4], ['P', pageRef], ['CreationDate', date], ['M', date], ['AP', new Map([['N', new Ref(ap)]])]])
+    return new Ref(annot)
   }
   const { fields, rect, ops, gs, bbox = rect, flags = 4 } = markAnnotation(o, at)
-  const ap = alloc()
-  out[ap] = new Stream(new Map([['Type', N('XObject')], ['Subtype', N('Form')], ['BBox', bbox.map((v) => Math.round(v * 1000) / 1000)],
+  out[ap] = new Stream(new Map([['Type', N('XObject')], ['Subtype', N('Form')], ['BBox', bbox.map(round)],
     ['Resources', new Map(gs ? [['ExtGState', new Map([['GS0', new Map([['Type', N('ExtGState')], ...gs])]])]] : [])]]),
   enc.encode(`${gs ? '/GS0 gs\n' : ''}${ops.join('\n')}`))
-  const date = new Str(enc.encode(`D:${new Date().toISOString().replace(/[-:T]|\.\d+/g, '').slice(0, 14)}Z`))
-  const annot = alloc()
-  out[annot] = new Map([['Type', N('Annot')], ...fields, ['Rect', rect.map((v) => Math.round(v * 1000) / 1000)], ['F', flags], ['P', pageRef],
+  out[annot] = new Map([['Type', N('Annot')], ...fields, ['Rect', rect.map(round)], ['F', flags], ['P', pageRef],
     ['CreationDate', date], ['M', date], ['AP', new Map([['N', new Ref(ap)]])]])
-  if (o.kind !== 'note') return [new Ref(annot)]
-  const popup = alloc()
-  out[popup] = new Map([['Type', N('Annot')], ['Subtype', N('Popup')], ['Rect', [rect[2], rect[3] - 120, rect[2] + 200, rect[3]]], ['Parent', new Ref(annot)], ['Open', false], ['F', 28]])
-  out[annot].set('Popup', new Ref(popup))
-  return [new Ref(annot), new Ref(popup)]
+  return new Ref(annot)
 }
 
 // parts: [{ doc, index, rotate, overlays?, crop?, text? } | { size: [w, h], rotate, overlays? }] in output order.

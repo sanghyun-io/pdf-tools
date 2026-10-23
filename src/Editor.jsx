@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { openPages } from './render.js'
-import { imagePixels, textPixels, turnedUrl, turnMark, steps, PX_PER_PT, SIGN_FONT, TEXT_FONT, layoutText, layoutTable, HEADER_FILL, cellText, cellImage } from './decor.js'
+import { imagePixels, textPixels, turnedUrl, turnMark, steps, PX_PER_PT, SIGN_FONT, TEXT_FONT, layoutText, layoutTable, HEADER_FILL, cellText, cellImage, noteLayout, NOTE_TEXT, NOTE_PAD } from './decor.js'
 import { MARKS } from './pdf.js'
 import { DEFAULT_FONT, commonFonts, localFonts, canAskFonts, fontLabel } from './fonts.js'
 import Signature from './Signature.jsx'
@@ -11,6 +11,7 @@ const MARKERS = { '#fde047': '노랑', '#86efac': '연두', '#f9a8d4': '분홍',
 const WIDTHS = [1, 2, 4, 8] // pt
 const MARKER_WIDTH = 12 // pt, the free highlighter
 const NOTE = 20 // pt, a note's icon (NOTE_SIZE in pdf.js)
+const SPREAD_WIDTH = 180 // pt, a note's box when it is spread out
 const TEXT_SIZES = [8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 32, 40, 48]
 const LINE_HEIGHTS = { 1.2: '줄 간격 좁게', 1.4: '줄 간격 보통', 1.8: '줄 간격 넓게' }
 const BORDERS = { 0: '선 없음', 0.5: '선 가늘게', 1: '선 보통', 2: '선 굵게' }
@@ -183,9 +184,11 @@ export default function Editor({ page, source, onApply, onClose, at = 0, total =
   const own = (it) => (turnOf(it) % 2 ? { w: it.view.h * H, h: it.view.w * W } : { w: it.view.w * W, h: it.view.h * H })
   // as tall as its content: it grows downwards in its own frame, which is another way on screen once turned
   function fitted(it) {
-    if (!BOXES.has(it.kind)) return it
+    const spread = it.kind === 'note' && it.open
+    if (!BOXES.has(it.kind) && !spread) return it
     const { w, h } = own(it)
-    const tall = it.kind === 'textbox' ? layoutText(it.text || ' ', { ...it, width: w }).height : layoutTable(it, w - it.border).height + it.border
+    const tall = spread ? noteLayout(it, w).height + 2 * NOTE_PAD
+      : it.kind === 'textbox' ? layoutText(it.text || ' ', { ...it, width: w }).height : layoutTable(it, w - it.border).height + it.border
     const d = tall - h, v = it.view
     const view = [{ ...v, h: v.h + d / H }, { ...v, x: v.x - d / W, w: v.w + d / W }, { ...v, y: v.y - d / H, h: v.h + d / H }, { ...v, w: v.w + d / W }][turnOf(it)]
     return { ...it, view }
@@ -548,6 +551,10 @@ export default function Editor({ page, source, onApply, onClose, at = 0, total =
           ))}
         </div>
         <span className="tool-name">{TOOLS[tool][0]}</span>
+      </div>
+      {/* the chosen tool's or item's options: always this one row, so the page never changes size with them */}
+      <div className="editor-tools details">
+        {!(styled && styled !== 'select' && (MARKS.has(styled === 'pen' ? 'ink' : styled) || textStyle || tableStyle)) && <span className="hint muted">{TOOLS[tool][1]}</span>}
         {styled && styled !== 'select' && MARKS.has(styled === 'pen' ? 'ink' : styled) && (
           <>
             <span className="sep" />
@@ -652,7 +659,8 @@ export default function Editor({ page, source, onApply, onClose, at = 0, total =
                 onDoubleClick={it.kind === 'textbox' ? () => write(it.id) : undefined}
               >
                 {it.viewUrl && <img src={it.viewUrl} alt="" draggable={false} />}
-                {MARKS.has(it.kind) && <Mark it={it} w={it.view.w * fit.width} h={it.view.h * fit.height} ppt={ppt} />}
+                {MARKS.has(it.kind) && !(it.kind === 'note' && it.open) && <Mark it={it} w={it.view.w * fit.width} h={it.view.h * fit.height} ppt={ppt} />}
+                {it.kind === 'note' && it.open && <SpreadNote it={it} width={it.view.w * W} ppt={ppt} />}
                 {BOXES.has(it.kind) && (
                   <Turned n={turnOf(it)} w={own(it).w * ppt} h={own(it).h * ppt}>
                     {it.kind === 'textbox' ? (
@@ -670,7 +678,7 @@ export default function Editor({ page, source, onApply, onClose, at = 0, total =
                     )}
                   </Turned>
                 )}
-                {!TEXT_MARKS.has(it.kind) && it.kind !== 'note' && <span className="handle" onPointerDown={(e) => drag(e, it.id, 'resize')} />}
+                {!TEXT_MARKS.has(it.kind) && (it.kind !== 'note' || it.open) && <span className="handle" onPointerDown={(e) => drag(e, it.id, 'resize')} />}
               </div>
             )
           })}
@@ -691,6 +699,11 @@ export default function Editor({ page, source, onApply, onClose, at = 0, total =
                 remember()
                 update(activeItem.id, { color })
                 setStyleState((s) => ({ ...s, marker: color })) // and for the next note
+              }}
+              onSpread={(open) => { // a spread note is a box with its text, its height following the text
+                remember()
+                const v = activeItem.view
+                update(activeItem.id, { open, view: open ? { ...v, w: Math.min(SPREAD_WIDTH / W, 1 - v.x) } : { ...v, w: NOTE / W, h: NOTE / H } })
               }}
             />
           )}
@@ -745,8 +758,9 @@ function TextMenu({ picked, items, fit, lineColor, onMark }) {
   )
 }
 
-// Beside a selected note: what it says and its color (the current one pressed). Opens on the side with room.
-function NoteMenu({ note, fit, textRef, onFocus, onText, onColor }) {
+// Beside a selected note: what it says, its color (the current one pressed), and whether it is spread out as
+// a box showing its text (Chrome's PDF viewer can't show a note's Korean text). Opens on the side with room.
+function NoteMenu({ note, fit, textRef, onFocus, onText, onColor, onSpread }) {
   const gap = 8, width = 250 // px
   const left = note.view.x * fit.width, right = (note.view.x + note.view.w) * fit.width
   const place = { top: note.view.y * fit.height, ...(right + gap + width > fit.width ? { right: fit.width - left + gap } : { left: right + gap }) }
@@ -759,6 +773,20 @@ function NoteMenu({ note, fit, textRef, onFocus, onText, onColor }) {
           <button key={c} className="swatch" style={{ background: c }} aria-pressed={note.color === c} aria-label={`메모 색 ${name}`} title={i ? name : `${name} (기본)`} onClick={() => onColor(c)} />
         ))}
       </div>
+      <label className="check spread" title="아이콘 대신 글이 보이는 상자로 저장합니다. 크롬 PDF 보기처럼 메모 내용을 띄우지 못하는 프로그램에서도 보입니다">
+        <input type="checkbox" checked={!!note.open} onChange={(e) => onSpread(e.target.checked)} /> 쪽에 펼쳐 보이기
+      </label>
+    </div>
+  )
+}
+
+// a spread note as it will be saved (decor.js noteDrawing): its color, an edge, its text
+function SpreadNote({ it, width, ppt }) {
+  const layout = useMemo(() => noteLayout(it, width), [it, width])
+  const font = fontCss({ ...NOTE_TEXT, font: it.font }, layout.lineH, ppt)
+  return (
+    <div className="spread-note" style={{ background: it.color }}>
+      {layout.lines.map((l, i) => <div key={i} className="box-line" style={{ ...font, left: (NOTE_PAD + l.x) * ppt, top: (NOTE_PAD + i * layout.lineH) * ppt }}>{l.text}</div>)}
     </div>
   )
 }

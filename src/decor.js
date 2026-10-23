@@ -222,20 +222,42 @@ export const HEADER_FILL = '#e8efff'
 // A text box or table as drawing steps for decorate in pdf.js ({ kind: 'vector', draw, height }): its text
 // real, in the PC font's own glyphs (book: a FontBook, fonts.js), its grid as lines. null when a font can't
 // be embedded or lacks one of the characters; the box is then saved as its picture.
+// A layout's lines as text drawing steps in a face, from (x0, y0); null if the face lacks a character.
+// The baseline sits below a line's middle where CSS puts it: half of ascent + descent.
+function glyphLines(book, layout, face, size, color, x0, y0) {
+  const out = [], below = (size * (face.font.ascent + face.font.descent)) / 2000
+  for (const [i, l] of layout.lines.entries()) {
+    if (!l.text.trim()) continue
+    const text = book.glyphs(face, l.text)
+    if (!text) return null
+    out.push({ text, font: face.key, size, color, bold: face.synthetic, x: x0 + l.x, y: y0 + (i + 0.5) * layout.lineH + below })
+  }
+  return out
+}
+
+// a spread note: its text at this size, this far inside its colored box
+export const NOTE_TEXT = { size: 10, lineHeight: 1.35, color: '#000000' }, NOTE_PAD = 5
+export const noteLayout = (o, width) => layoutText(o.text || ' ', { ...NOTE_TEXT, font: o.font, width: Math.max(1, width - 2 * NOTE_PAD) })
+
+// A spread note (shown as a box with its text, not an icon) as drawing steps: its color, an edge, and the
+// text, real in a PC font when the book can, else a picture of it. Returns { draw, height } in points.
+export async function noteDrawing(o, width, book) {
+  const layout = noteLayout(o, width), height = layout.height + 2 * NOTE_PAD
+  const draw = [{ fill: o.color, x: 0, y: 0, w: width, h: height },
+    { stroke: '#404040', width: 0.75, segments: [[0, 0, width, 0], [width, 0, width, height], [width, height, 0, height], [0, height, 0, 0]] }]
+  const face = book && await book.face(o.font ?? DEFAULT_FONT, false)
+  const text = face && glyphLines(book, layout, face, NOTE_TEXT.size, NOTE_TEXT.color, NOTE_PAD, NOTE_PAD)
+  if (text) draw.push(...text)
+  else if (o.text?.trim()) {
+    const { image } = await textBoxPixels({ ...NOTE_TEXT, text: o.text, font: o.font }, width - 2 * NOTE_PAD)
+    draw.push({ image, x: NOTE_PAD, y: NOTE_PAD, w: width - 2 * NOTE_PAD, h: layout.height })
+  }
+  return { draw, height }
+}
+
 export async function boxDrawing(o, width, book) {
   const family = o.font ?? DEFAULT_FONT
-  // the baseline below a line's middle, where CSS puts it: half of ascent + descent
-  const below = (face, size) => (size * (face.font.ascent + face.font.descent)) / 2000
-  const lines = (layout, face, size, color, x0, y0) => {
-    const out = []
-    for (const [i, l] of layout.lines.entries()) {
-      if (!l.text.trim()) continue
-      const text = book.glyphs(face, l.text)
-      if (!text) return null
-      out.push({ text, font: face.key, size, color, bold: face.synthetic, x: x0 + l.x, y: y0 + (i + 0.5) * layout.lineH + below(face, size) })
-    }
-    return out
-  }
+  const lines = (layout, face, size, color, x0, y0) => glyphLines(book, layout, face, size, color, x0, y0)
   if (o.kind === 'textbox') {
     const face = await book.face(family, o.bold)
     const layout = layoutText(o.text, { ...o, width })

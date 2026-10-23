@@ -249,6 +249,12 @@ header a { color: var(--accent); }
 .signature .tabs button { padding: 6px 10px; }
 .editor-tools button.icon { display: grid; place-items: center; width: 36px; height: 34px; padding: 0; }
 .editor-tools .tool-name { min-width: 4em; font-size: 13px; color: var(--muted); } /* the chosen tool, for screens without hover */
+/* the options row: one line of fixed height whatever it holds, scrolled sideways when it is too long */
+.editor-tools.details { flex-wrap: nowrap; height: 38px; overflow-x: auto; overflow-y: hidden; scrollbar-width: thin; }
+.editor-tools.details > * { flex: none; }
+.editor-tools.details > .sep:first-child { display: none; }
+.editor-tools.details .hint { flex: 1 1 auto; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 13px; }
+.editor-tools .font-pick { width: 150px; }
 .editor .actions { flex-wrap: wrap; }
 .editor .actions .muted { flex: 1 1 260px; }
 .editor .actions button { flex: none; white-space: nowrap; }
@@ -302,6 +308,8 @@ button[aria-pressed="true"] { background: var(--accent-soft); border-color: var(
 }
 .editor .note-menu textarea { display: block; width: 100%; box-sizing: border-box; padding: 6px 8px; font: inherit; font-size: 14px; border: 1px solid var(--line); border-radius: 8px; resize: vertical; }
 .editor .note-menu .swatches { display: flex; align-items: center; gap: 6px; margin-top: 8px; font-size: 13px; }
+.editor .note-menu .spread { margin-top: 8px; font-size: 13px; }
+.editor .spread-note { position: absolute; inset: 0; box-sizing: border-box; border: 1px solid #404040; pointer-events: none; }
 .editor .text-menu .sep { width: 1px; height: 20px; background: var(--line); }
 /* pdf.js's text layer, from pdfjs-dist web/pdf_viewer.css (Apache-2.0): just what picking text needs */
 .textLayer {

@@ -279,7 +279,9 @@ test('marks become annotations with pictures where they were put, turning with t
   ])
   const pages = await eachPage(bytes, async (page) => {
     const vp = page.getViewport({ scale: 1, rotation: 0 }) // the page as it was when marked
-    return (await page.getAnnotations()).filter((a) => !['Popup', 'Link'].includes(a.subtype)).map((a) => { // the file has links of its own
+    const all = await page.getAnnotations()
+    assert.ok(!all.some((a) => a.subtype === 'Popup'), 'a note brings no Popup of its own (Chrome drew it as an empty box)')
+    return all.filter((a) => a.subtype !== 'Link').map((a) => { // the file has links of its own
       const [x0, y0] = apply(vp.transform, a.rect[0], a.rect[1]), [x1, y1] = apply(vp.transform, a.rect[2], a.rect[3])
       return { a, box: [Math.min(x0, x1) / vp.width, Math.min(y0, y1) / vp.height, Math.max(x0, x1) / vp.width, Math.max(y0, y1) / vp.height] }
     })
@@ -298,6 +300,22 @@ test('marks become annotations with pictures where they were put, turning with t
     near(marks.at(-1).box.slice(0, 2), [0.05, 0.9], 'note pinned by its top-left')
     assert.equal(marks[2].a.quadPoints.length, 8)
   }
+})
+
+test('a spread note is a FreeText whose own picture shows it, where the note was put', async () => {
+  const doc = await readPdf(fixture('chrome.pdf'))
+  const note = { kind: 'note', open: true, x: 0.2, y: 0.3, w: 0.3, h: 0.05, rot: 0, color: '#fde047', text: '보이는 메모',
+    spread: [{ fill: '#fde047', x: 0, y: 0, w: 178.488, h: 42.096 }, { stroke: '#404040', width: 0.75, segments: [[0, 0, 178.488, 0]] }] }
+  const { bytes } = await buildPdf([{ doc, index: 0, rotate: 90, overlays: [note] }]) // turned after: the box turns with it
+  const [found] = await eachPage(bytes, async (page) => {
+    const vp = page.getViewport({ scale: 1, rotation: 0 })
+    const a = (await page.getAnnotations()).find((x) => x.subtype === 'FreeText')
+    const [x0, y0] = apply(vp.transform, a.rect[0], a.rect[3])
+    return { contents: a.contentsObj.str, appearance: a.hasAppearance, at: [x0 / vp.width, y0 / vp.height] }
+  })
+  assert.equal(found.contents, '보이는 메모')
+  assert.ok(found.appearance)
+  near(found.at, [0.2, 0.3], 'top-left of the box')
 })
 
 test('a mark turned with its page keeps its points where the page puts them', () => {
@@ -400,7 +418,7 @@ test('flatten paints marks into the page; notes stay notes', async () => {
     subtypes: (await page.getAnnotations()).map((a) => a.subtype).filter((s) => s !== 'Link'),
     forms: (await page.getOperatorList()).fnArray.filter((fn) => fn === OPS.paintFormXObjectBegin).length,
   }))
-  assert.deepEqual(subtypes.sort(), ['Popup', 'Text'])
+  assert.deepEqual(subtypes, ['Text'])
   assert.ok(forms >= MARK_SET.length - 1, `painted ${forms}`)
 })
 

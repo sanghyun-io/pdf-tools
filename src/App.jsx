@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { readPdf, buildPdf, imageToPdf, picturePage, pageInfo, pageBox, moveItems, PasswordError } from './pdf.js'
 import { renderThumbs, renderPages, openPages, pageThumb } from './render.js'
 import { prepare, recognize, textLayer } from './ocr/client.js'
-import { imagePixels, textPixels, turnBox, steps, textBoxPixels, tablePixels, boxDrawing } from './decor.js'
+import { imagePixels, textPixels, turnBox, steps, textBoxPixels, tablePixels, boxDrawing, noteDrawing } from './decor.js'
 import { FontBook, localFonts } from './fonts.js'
 import { zip } from './zip.js'
 import { inAppBrowser } from './inapp.js'
@@ -309,8 +309,12 @@ export default function App() {
   // text (decor.js). Either way the box is as tall as laid out.
   async function withPictures(p, book = null) {
     return Promise.all((p.overlays ?? []).map(async (o) => {
-      if (o.kind !== 'textbox' && o.kind !== 'table') return o
       const [W, H] = o.rot % 180 ? [p.h, p.w] : [p.w, p.h] // the page as shown when the box was placed
+      if (o.kind === 'note' && o.open) { // a spread note: a box showing its text, drawn by pdf.js as a FreeText
+        const { draw, height } = await noteDrawing(o, o.w * W, book)
+        return { ...o, spread: draw, h: height / H }
+      }
+      if (o.kind !== 'textbox' && o.kind !== 'table') return o
       const real = book && await boxDrawing(o, o.w * W, book)
       if (real) return { ...real, x: o.x, y: o.y, w: o.w, h: real.height / H, rot: o.rot }
       const { image, height, runs } = o.kind === 'textbox' ? await textBoxPixels(o, o.w * W) : await tablePixels(o, o.w * W - o.border)
