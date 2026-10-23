@@ -488,7 +488,6 @@ export default function App() {
               <button disabled={!selected.size} onClick={() => rotateSelected(-90)} title="왼쪽으로 90°">↺ 왼쪽</button>
               <button disabled={!selected.size} onClick={() => rotateSelected(90)} title="오른쪽으로 90°">↻ 오른쪽</button>
               <button disabled={!selected.size} onClick={removeSelected}>삭제</button>
-              <button disabled={selected.size !== 1} onClick={() => setEditing([...selected][0])} title="도장·서명·글상자·가림·펜·형광펜·도형·메모 (쪽을 더블클릭해도 됩니다)">꾸미기</button>
               <button onClick={addBlank} title="선택한 쪽 뒤(없으면 맨 끝)에 넣습니다">빈 쪽</button>
               <button onClick={() => setSelected(new Set(pages.map((p) => p.id)))}>전체 선택</button>
               {undoButton}
@@ -610,7 +609,7 @@ export default function App() {
           </details>
 
           <p className="muted help">
-            클릭 선택 · Ctrl+클릭 추가/해제 · Shift+클릭 범위 · Ctrl+A 전체 · 끌어서 옮기기 · 더블클릭 꾸미기 · Delete 삭제 · Ctrl+Z 되돌리기 · Esc 선택 해제
+            클릭 선택 · Ctrl+클릭 추가/해제 · Shift+클릭 범위 · Ctrl+A 전체 · 끌어서 옮기기 · 연필 단추나 더블클릭으로 꾸미기 · Delete 삭제 · Ctrl+Z 되돌리기 · Esc 선택 해제
           </p>
           <div className="grid" onClick={() => setSelected(new Set())}>
             {pages.map((p, i) => {
@@ -638,6 +637,14 @@ export default function App() {
                       {thumb && <img src={thumb} alt="" draggable={false} />}
                     </div>
                   </div>
+                  <button
+                    className="edit" aria-label="꾸미기" title="꾸미기: 도장·서명·글상자·가림·펜·형광펜·도형·메모 (쪽을 더블클릭해도 됩니다)"
+                    onClick={(e) => { e.stopPropagation(); setEditing(p.id) }} onDoubleClick={(e) => e.stopPropagation()}
+                  >
+                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                      <path d="M4 20h4L19 9l-4-4L4 16z" /><path d="M13.5 6.5l4 4" />
+                    </svg>
+                  </button>
                   {p.overlays?.length > 0 && <span className="decor" title="꾸민 것 (도장·글상자·펜·도형·메모 등)">꾸밈 {p.overlays.length}</span>}
                   {src && <span className="badge" title={`${src.name}의 원래 ${p.index + 1}쪽`}>p.{p.index + 1}</span>}
                   <div className="label" title={src?.name}>

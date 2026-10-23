@@ -10,13 +10,12 @@ const MARKERS = { '#fde047': '노랑', '#86efac': '연두', '#f9a8d4': '분홍',
 const WIDTHS = [1, 2, 4, 8] // pt
 const MARKER_WIDTH = 12 // pt, the free highlighter
 const NOTE = 20 // pt, a note's icon (NOTE_SIZE in pdf.js)
+const MAX_STEPS = 100 // how far back 되돌리기 goes
 // what a press on the page does
 const TOOLS = {
-  select: ['선택', '눌러서 고르고, 끌어서 옮기고, 오른쪽 아래 모서리로 크기를 바꿉니다'],
+  select: ['선택', '눌러서 고르고, 끌어서 옮기고, 오른쪽 아래 모서리로 크기를 바꿉니다. 글자를 끌어서 고르면 형광펜·밑줄·취소선을 고를 수 있습니다'],
   pen: ['펜', '끌어서 그립니다. 이어서 그린 획은 하나로 묶입니다'],
-  highlight: ['형광펜', '글자를 끌어서 고르면 칠합니다. 글자가 없는 쪽(스캔)은 끌어서 칠합니다'],
-  underline: ['밑줄', '글자를 끌어서 고르면 밑줄을 긋습니다'],
-  strikeout: ['취소선', '글자를 끌어서 고르면 가운데에 줄을 긋습니다'],
+  highlight: ['형광펜', '끌어서 자유롭게 칠합니다 (스캔처럼 글자가 없는 곳). 글자에 칠하려면 선택 도구로 글자를 끌어서 고르세요'],
   square: ['네모', '끌어서 그립니다'],
   circle: ['동그라미', '끌어서 그립니다'],
   line: ['선', '끌어서 긋습니다'],
@@ -25,6 +24,26 @@ const TOOLS = {
 }
 const TEXT_MARKS = new Set(['highlight', 'underline', 'strikeout']) // made by picking text: they don't move
 const tint = (hex) => '#' + [1, 3, 5].map((i) => Math.round(255 - (255 - parseInt(hex.slice(i, i + 2), 16)) * 0.2).toString(16).padStart(2, '0')).join('')
+
+// Text marks as line boxes { x, y, w, h } in page fractions, and back.
+const lineBoxes = (it) => it.rects.map(([u, v, w, h]) => ({ x: it.view.x + u * it.view.w, y: it.view.y + v * it.view.h, w: w * it.view.w, h: h * it.view.h }))
+function textMark(lines) {
+  const x0 = Math.min(...lines.map((l) => l.x)), y0 = Math.min(...lines.map((l) => l.y))
+  const view = { x: x0, y: y0, w: Math.max(...lines.map((l) => l.x + l.w)) - x0, h: Math.max(...lines.map((l) => l.y + l.h)) - y0 }
+  return { view, rects: lines.map((l) => [(l.x - x0) / view.w, (l.y - y0) / view.h, l.w / view.w, l.h / view.h]) }
+}
+const sameLine = (a, b) => Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y) > Math.min(a.h, b.h) / 2
+const SLIVER = 0.004 // page width, less than a letter: what is left over from picking the same text twice
+const touches = (a, b) => sameLine(a, b) && Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x) > SLIVER
+// a line box with the picked text taken out: what stays marked when part of a marked line is unmarked
+function cut(box, picked) {
+  let parts = [box]
+  for (const s of picked) {
+    parts = parts.flatMap((p) => (!touches(p, s) ? [p]
+      : [{ ...p, w: s.x - p.x }, { ...p, x: s.x + s.w, w: p.x + p.w - s.x - s.w }].filter((q) => q.w > SLIVER)))
+  }
+  return parts
+}
 
 let nextId = 0
 
@@ -39,10 +58,12 @@ export default function Editor({ page, source, onApply, onClose }) {
   const [picture, setPicture] = useState(null)
   const [hasText, setHasText] = useState(false)
   const [items, setItems] = useState(null) // overlays + { view: box at `rot`, viewUrl }
+  const [history, setHistory] = useState({ past: [], future: [] }) // earlier and undone `items`
   const [active, setActive] = useState(null)
   const [tool, setTool] = useState('select')
   const [style, setStyleState] = useState({ color: '#000000', marker: '#fde047', width: 2, fill: false })
   const [draft, setDraft] = useState(null) // the stroke or shape being drawn: { tool, pts: [x, y, ...] } in page fractions
+  const [picked, setPicked] = useState(null) // text picked with the select tool, line boxes: offers the text menu
   const [signing, setSigning] = useState(false)
   const [text, setText] = useState({ value: '', size: 12, color: '#000000' })
   const [clearWhite, setClearWhite] = useState(true)
@@ -50,6 +71,7 @@ export default function Editor({ page, source, onApply, onClose }) {
   const [fit, setFit] = useState(null) // paper size in px
   const stage = useRef(null), paper = useRef(null), textLayer = useRef(null), noteText = useRef(null)
   const extend = useRef(null) // the pen drawing later strokes join, until the tool or style changes
+  const typing = useRef(false) // a note's text being written: one step until the box is left
 
   useEffect(() => {
     let live = true
@@ -88,7 +110,27 @@ export default function Editor({ page, source, onApply, onClose }) {
     return () => ro.disconnect()
   }, [W, H])
 
+  // Every edit calls this first: the list as it is becomes a step to go back to, and steps undone before are
+  // gone, as in any editor.
+  const remember = () => setHistory((h) => ({ past: [...h.past, items].slice(-MAX_STEPS), future: [] }))
+  const restore = (list) => {
+    setItems(list)
+    setActive(null)
+    extend.current = null
+  }
+  const undo = () => {
+    if (!history.past.length) return
+    setHistory({ past: history.past.slice(0, -1), future: [items, ...history.future] })
+    restore(history.past.at(-1))
+  }
+  const redo = () => {
+    if (!history.future.length) return
+    setHistory({ past: [...history.past, items], future: history.future.slice(1) })
+    restore(history.future[0])
+  }
+
   const put = (item) => {
+    remember()
     const id = nextId++
     setItems((list) => [...list, { id, rot, ...item }])
     setActive(id)
@@ -117,6 +159,8 @@ export default function Editor({ page, source, onApply, onClose }) {
     setText((t) => ({ ...t, value: '' }))
   }
   const remove = () => {
+    if (active === null) return
+    remember()
     setItems((list) => list.filter((it) => it.id !== active))
     setActive(null)
   }
@@ -125,6 +169,7 @@ export default function Editor({ page, source, onApply, onClose }) {
   const chooseTool = (t) => {
     extend.current = null
     setTool(t)
+    setPicked(null)
     if (t !== 'select') setActive(null)
   }
   // a new color, width or fill also changes the selected mark
@@ -140,6 +185,8 @@ export default function Editor({ page, source, onApply, onClose }) {
     if (fields.width && 'width' in it && !it.marker) f.width = fields.width
     if ('fill' in fields && (it.kind === 'square' || it.kind === 'circle')) f.fill = fields.fill ? tint(it.color) : null
     if (f.color && it.fill) f.fill = tint(f.color)
+    if (!Object.keys(f).length) return
+    remember()
     update(it.id, f)
   }
 
@@ -150,9 +197,11 @@ export default function Editor({ page, source, onApply, onClose }) {
     extend.current = null
     const r = paper.current.getBoundingClientRect()
     const { view: from, kind } = items.find((it) => it.id === id)
-    if (TEXT_MARKS.has(kind)) return // tied to the text under it
     const sx = e.clientX, sy = e.clientY
+    let moved = false // a click that only selects is no step
     const move = (ev) => {
+      if (!moved) remember()
+      moved = true
       const dx = (ev.clientX - sx) / r.width, dy = (ev.clientY - sy) / r.height
       let v
       if (mode === 'move') {
@@ -194,7 +243,8 @@ export default function Editor({ page, source, onApply, onClose }) {
     const look = marker ? { color: style.marker, width: MARKER_WIDTH, marker: true } : { color: style.color, width: style.width, marker: false }
     const prev = items.find((it) => it.id === extend.current && it.kind === 'ink' && it.color === look.color && it.width === look.width && !!it.marker === look.marker)
     const drawing = { kind: 'ink', ...look, ...inkBox([...(prev ? absLines(prev) : []), pts], look.width) }
-    if (prev) {
+    if (prev) { // one step per stroke, so 되돌리기 takes the last stroke off
+      remember()
       update(prev.id, drawing)
       setActive(prev.id)
     } else extend.current = put(drawing)
@@ -259,7 +309,6 @@ export default function Editor({ page, source, onApply, onClose }) {
     for (let i = 0; i < sel.rangeCount; i++) {
       for (const b of sel.getRangeAt(i).getClientRects()) if (b.width && b.height) boxes.push({ x: b.left - r.left, y: b.top - r.top, w: b.width, h: b.height })
     }
-    sel.removeAllRanges()
     const lines = []
     for (const b of boxes.sort((p, q) => p.y - q.y || p.x - q.x)) {
       const l = lines.find((q) => Math.min(q.y + q.h, b.y + b.h) - Math.max(q.y, b.y) > Math.min(q.h, b.h) / 2 && b.x <= q.x + q.w + q.h && b.x + b.w >= q.x - q.h)
@@ -270,17 +319,30 @@ export default function Editor({ page, source, onApply, onClose }) {
     }
     return lines.map((l) => ({ x: l.x / r.width, y: l.y / r.height, w: l.w / r.width, h: l.h / r.height }))
   }
-  function startPick() {
-    const t = tool
+  // with the select tool, text dragged over is picked and the text menu offered for it
+  function pickText() {
     const up = () => {
       window.removeEventListener('pointerup', up)
       const lines = pickedLines()
-      if (!lines.length) return
-      const x0 = Math.min(...lines.map((l) => l.x)), y0 = Math.min(...lines.map((l) => l.y))
-      const box = { x: x0, y: y0, w: Math.max(...lines.map((l) => l.x + l.w)) - x0, h: Math.max(...lines.map((l) => l.y + l.h)) - y0 }
-      put({ kind: t, view: box, color: t === 'highlight' ? style.marker : style.color, rects: lines.map((l) => [(l.x - x0) / box.w, (l.y - y0) / box.h, l.w / box.w, l.h / box.h]) })
+      setPicked(lines.length ? lines : null)
     }
     window.addEventListener('pointerup', up)
+  }
+  // From the text menu, one step: [[kind, color or null to take it off]] for the picked text. The picked part
+  // is first taken out of marks of that kind, so a part of a marked line can be recolored or unmarked.
+  function markPicked(changes, lineColor) {
+    if (lineColor) setStyleState((s) => ({ ...s, color: lineColor })) // also for underlines made later
+    if (!changes.length) return
+    remember()
+    const sel = picked
+    setItems((list) => changes.reduce((next, [kind, color]) => [
+      ...next.flatMap((it) => {
+        if (it.kind !== kind) return [it]
+        const left = lineBoxes(it).flatMap((box) => cut(box, sel))
+        return left.length ? [{ ...it, ...textMark(left) }] : []
+      }),
+      ...(color ? [{ id: nextId++, rot, kind, color, ...textMark(sel) }] : []),
+    ], list))
   }
 
   async function addSignature(sig) {
@@ -298,10 +360,19 @@ export default function Editor({ page, source, onApply, onClose }) {
   const apply = () => onApply(items.map(({ id: _id, view, viewUrl: _url, ...o }) => turnMark({ ...o, ...view }, steps(rot, o.rot))))
   const redacting = items?.some((it) => it.kind === 'redact')
   const onKey = (e) => {
-    if (e.key === 'Delete' && active !== null && !e.target.closest('input, textarea, select')) remove()
+    if (e.target.closest('input, textarea, select, .signature')) return // text boxes keep their own undo and Delete
+    const mod = e.ctrlKey || e.metaKey, key = e.key.toLowerCase()
+    if (e.key === 'Delete') remove()
+    else if (mod && key === 'z' && !e.shiftKey) {
+      e.preventDefault()
+      undo()
+    } else if (mod && (key === 'y' || (key === 'z' && e.shiftKey))) {
+      e.preventDefault()
+      redo()
+    }
   }
-  const picking = TEXT_MARKS.has(tool) && hasText
-  const drawing = tool !== 'select' && !picking && !(tool !== 'highlight' && TEXT_MARKS.has(tool)) // underline needs text
+  const selecting = tool === 'select' && hasText // text can be picked under the stamps and marks
+  const drawing = tool !== 'select'
   const ppt = fit ? fit.width / W : 1 // px per point
   // which style controls to show: for the tool, else for the selected mark
   const styled = tool !== 'select' ? tool : activeItem?.kind === 'ink' ? (activeItem.marker ? 'highlight' : 'pen') : activeItem?.kind
@@ -333,13 +404,12 @@ export default function Editor({ page, source, onApply, onClose }) {
         <button disabled={active === null} onClick={remove}>선택한 것 지우기</button>
       </div>
       <div className="editor-tools">
+        <button disabled={!history.past.length} onClick={undo} title="Ctrl+Z">되돌리기</button>
+        <button disabled={!history.future.length} onClick={redo} title="Ctrl+Y">다시 하기</button>
+        <span className="sep" />
         <div className="tools" role="group" aria-label="도구">
           {Object.entries(TOOLS).map(([k, [label, title]]) => (
-            <button
-              key={k} aria-pressed={tool === k} onClick={() => chooseTool(k)}
-              disabled={(k === 'underline' || k === 'strikeout') && !hasText}
-              title={(k === 'underline' || k === 'strikeout') && !hasText ? '글자가 있는 쪽에서만 됩니다' : title}
-            >{label}</button>
+            <button key={k} aria-pressed={tool === k} onClick={() => chooseTool(k)} title={title}>{label}</button>
           ))}
         </div>
         {styled && styled !== 'select' && MARKS.has(styled === 'pen' ? 'ink' : styled) && (
@@ -367,7 +437,12 @@ export default function Editor({ page, source, onApply, onClose }) {
         {activeItem?.kind === 'note' && (
           <textarea
             ref={noteText} className="note-text" rows={2} placeholder="메모 내용" value={activeItem.text}
-            onChange={(e) => update(activeItem.id, { text: e.target.value })}
+            onFocus={() => { typing.current = false }}
+            onChange={(e) => {
+              if (!typing.current) remember()
+              typing.current = true
+              update(activeItem.id, { text: e.target.value })
+            }}
           />
         )}
       </div>
@@ -375,10 +450,10 @@ export default function Editor({ page, source, onApply, onClose }) {
       {redacting && (
         <p className="muted">가림 상자가 있는 쪽은 저장할 때 그림으로 바뀌어, 가린 글자가 파일에서 완전히 지워집니다. 그 쪽은 글자 선택·검색이 안 됩니다.</p>
       )}
-      <div className="stage" ref={stage} onPointerDown={() => setActive(null)}>
-        <div className={['paper', drawing && 'drawing', picking && 'picking'].filter(Boolean).join(' ')} ref={paper} style={fit ?? undefined}>
+      <div className="stage" ref={stage} onPointerDown={() => { setActive(null); setPicked(null) }}>
+        <div className={['paper', drawing && 'drawing', selecting && 'selecting'].filter(Boolean).join(' ')} ref={paper} style={fit ?? undefined}>
           {picture ? <img src={picture} alt="" draggable={false} /> : source && <span className="muted">쪽을 그리는 중…</span>}
-          <div className="textLayer" ref={textLayer} style={{ '--total-scale-factor': ppt }} onPointerDown={picking ? startPick : undefined} />
+          <div className="textLayer" ref={textLayer} style={{ '--total-scale-factor': ppt }} onPointerDown={selecting ? pickText : undefined} />
           {fit && items?.map((it) => {
             const box = { left: `${it.view.x * 100}%`, top: `${it.view.y * 100}%`, width: `${it.view.w * 100}%`, height: `${it.view.h * 100}%` }
             const shape = it.kind === 'square' || it.kind === 'circle'
@@ -396,15 +471,49 @@ export default function Editor({ page, source, onApply, onClose }) {
           })}
           {drawing && <div className="draw" onPointerDown={startDraw} title={TOOLS[tool][1]} />}
           {draft && fit && <Draft {...draft} fit={fit} style={style} ppt={ppt} />}
+          {picked && fit && items && <TextMenu picked={picked} items={items} fit={fit} lineColor={style.color} onMark={markPicked} />}
         </div>
       </div>
       <div className="actions">
-        <span className="muted">도구를 고르고 쪽 위에서 끌어서 그립니다. 선택 도구로 옮기고 크기를 바꾸며, Delete로 지웁니다.</span>
+        <span className="muted">도구를 고르고 쪽 위에서 끌어서 그립니다. 선택 도구로 옮기고 크기를 바꾸며, 글자를 끌어서 고르면 형광펜·밑줄·취소선을 고릅니다. Delete 지우기, Ctrl+Z 되돌리기, Ctrl+Y 다시 하기.</span>
         <button onClick={onClose}>취소</button>
         <button className="primary" disabled={!items} onClick={apply}>적용</button>
       </div>
       {signing && <Signature onPick={addSignature} onClose={() => setSigning(false)} />}
     </dialog>
+  )
+}
+
+// The menu over text picked with the select tool: what the text has now (pressed), and changes to it.
+function TextMenu({ picked, items, fit, lineColor, onMark }) {
+  const on = (kind) => items.filter((it) => it.kind === kind && lineBoxes(it).some((box) => picked.some((s) => touches(box, s))))
+  const highlight = on('highlight')[0]?.color ?? null, underline = on('underline'), strikeout = on('strikeout')
+  const color = underline[0]?.color ?? strikeout[0]?.color ?? lineColor
+  const x0 = Math.min(...picked.map((l) => l.x)), x1 = Math.max(...picked.map((l) => l.x + l.w))
+  const y0 = Math.min(...picked.map((l) => l.y)), y1 = Math.max(...picked.map((l) => l.y + l.h))
+  const below = y0 * fit.height < 56 // no room above the text
+  const half = 200 // px, about half the menu: kept inside the page
+  const place = { left: Math.min(Math.max(((x0 + x1) / 2) * fit.width, half), fit.width - half), top: (below ? y1 : y0) * fit.height }
+  return (
+    <div
+      className={['text-menu', below && 'below'].filter(Boolean).join(' ')} style={place} role="toolbar" aria-label="고른 글자"
+      onPointerDown={(e) => e.stopPropagation()} onMouseDown={(e) => e.target.tagName !== 'SELECT' && e.preventDefault()} // keep the text picked
+    >
+      <span className="muted">형광펜</span>
+      {Object.entries(MARKERS).map(([c, name]) => (
+        <button key={c} className="swatch" style={{ background: c }} aria-pressed={highlight === c} aria-label={`형광펜 ${name}`} title={name} onClick={() => onMark([['highlight', c]])} />
+      ))}
+      <button aria-pressed={!highlight} onClick={() => onMark([['highlight', null]])} title="형광펜 지우기">없음</button>
+      <span className="sep" />
+      <button aria-pressed={underline.length > 0} onClick={() => onMark([['underline', underline.length ? null : color]])}>밑줄</button>
+      <button aria-pressed={strikeout.length > 0} onClick={() => onMark([['strikeout', strikeout.length ? null : color]])}>취소선</button>
+      <select
+        value={color} aria-label="줄 색" title="밑줄·취소선 색"
+        onChange={(e) => onMark([...(underline.length ? [['underline', e.target.value]] : []), ...(strikeout.length ? [['strikeout', e.target.value]] : [])], e.target.value)}
+      >
+        {Object.entries(COLORS).map(([v, label]) => <option key={v} value={v}>{label}</option>)}
+      </select>
+    </div>
   )
 }
 
