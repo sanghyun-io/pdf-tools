@@ -6,7 +6,7 @@ import { readFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { crc32 as zlibCrc32, gunzipSync } from 'node:zlib'
 import { getDocument, OPS } from 'pdfjs-dist/legacy/build/pdf.mjs'
-import { readPdf, buildPdf, pageInfo, moveItems, Ref, Str, PasswordError } from '../src/pdf.js'
+import { readPdf, buildPdf, pageInfo, moveItems, readMarks, Ref, Str, PasswordError } from '../src/pdf.js'
 import { md5 } from '../src/crypt.js'
 import { zip, crc32 } from '../src/zip.js'
 import { loadModel } from '../src/ocr/model.js'
@@ -316,6 +316,48 @@ test('a spread note is a FreeText whose own picture shows it, where the note was
   assert.equal(found.contents, '보이는 메모')
   assert.ok(found.appearance)
   near(found.at, [0.2, 0.3], 'top-left of the box')
+})
+
+test('marks saved here come back as the marks they were, and save again in place of the old ones', async () => {
+  const doc = await readPdf(fixture('chrome.pdf'))
+  const spread = [{ fill: '#fde047', x: 0, y: 0, w: 178.488, h: 42.096 }]
+  const box = { kind: 'note', open: true, x: 0.2, y: 0.3, w: 0.3, h: 0.05, rot: 0, color: '#fde047', text: '보이는 메모', spread }
+  const first = await buildPdf([
+    { doc, index: 0, rotate: 0, overlays: [...MARK_SET, box] },
+    { doc, index: 1, rotate: 90, overlays: [...MARK_SET, box] }, // turned after marking
+  ])
+  const saved = await readPdf(first.bytes)
+  const back = saved.pages.map((_, index) => readMarks(saved, index))
+  for (const { marks } of back) {
+    assert.deepEqual(marks.map((m) => m.kind), [...MARK_SET.map((m) => m.kind), 'note'])
+    // text marks and box notes as they were put, before the page turned (their lines show it); others as it is now
+    const turned = marks === back[1].marks
+    assert.deepEqual(marks.map((m) => m.rot), marks.map((_, i) => (turned && ![2, 3, 4, 10].includes(i) ? 90 : 0)))
+    const [pen, marker, highlight, underline, , square, , , arrow, note, open] = marks
+    assert.deepEqual([pen.color, pen.width, marker.marker, marker.width], ['#1d4ed8', 2, true, 12])
+    near([highlight.x, highlight.y, highlight.w, highlight.h], [0.3, 0.5, 0.4, 0.02], 'highlight where it was')
+    assert.equal(underline.rects.length, 2)
+    assert.deepEqual([square.fill, square.width, arrow.kind], ['#ffeeee', 2, 'arrow'])
+    assert.deepEqual([note.text, note.color, !!note.open, open.text, open.open], ['메모 내용 😀', '#fde047', false, '보이는 메모', true])
+    near([open.x, open.y, open.w, open.h], [0.2, 0.3, 0.3, 0.05], 'box note where it was')
+  }
+  // an annotation with entries of its own (here an author) is someone else's: it stays as it is
+  const annots = saved.get(saved.pages[0].dict.get('Annots'))
+  saved.get(annots.find((r) => saved.get(saved.get(r).get('Subtype')).v === 'Circle')).set('T', new Str(latin1('someone')))
+  const kept = readMarks(saved, 0)
+  assert.ok(!kept.marks.some((m) => m.kind === 'circle'))
+  // saved again with the marks put back: the same annotations in the same places, once each, links kept
+  const boxes = (bytes) => eachPage(bytes, async (page) => (await page.getAnnotations()).map((a) => ({ subtype: a.subtype, rect: a.rect })))
+  const again = await buildPdf(saved.pages.map((_, index) => {
+    const { marks, refs } = index ? back[1] : kept
+    return { doc: saved, index, rotate: 0, overlays: marks.map((m) => (m.open ? { ...m, spread } : m)), drop: refs }
+  }))
+  const [was, now] = [await boxes(first.bytes), await boxes(again.bytes)]
+  const order = (list) => list.map((p) => [...p].sort((a, b) => a.subtype.localeCompare(b.subtype) || a.rect[0] - b.rect[0] || a.rect[1] - b.rect[1]))
+  order(now).forEach((page, i) => {
+    assert.deepEqual(page.map((a) => a.subtype), order(was)[i].map((a) => a.subtype))
+    page.forEach((a, k) => near(a.rect, order(was)[i][k].rect, `${a.subtype} on page ${i + 1}`))
+  })
 })
 
 test('a mark turned with its page keeps its points where the page puts them', () => {

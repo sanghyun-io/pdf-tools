@@ -1,7 +1,7 @@
 // Drawing pages as pictures (thumbnails, the page editor, "save as images") is the one job left to pdf.js.
 // Reading and writing PDFs stays in pdf.js (ours).
 // legacy build: polyfills Promise.try & co., which iOS before 18.2 and older WebViews lack (+57 KB)
-import { getDocument, GlobalWorkerOptions, PDFWorker, TextLayer } from 'pdfjs-dist/legacy/build/pdf.mjs'
+import { AnnotationMode, getDocument, GlobalWorkerOptions, PDFWorker, TextLayer } from 'pdfjs-dist/legacy/build/pdf.mjs'
 import workerUrl from 'pdfjs-dist/legacy/build/pdf.worker.min.mjs?url'
 
 // The single-file build is opened from disk (file://), where a page can start only a classic worker from a blob:
@@ -18,7 +18,8 @@ if (import.meta.env.MODE.startsWith('single')) {
 
 // A document kept open to draw pages from: { count, draw(index, scale, rotation) -> canvas, close() }.
 // scale(width, height) gets the page size in points; rotation: absolute degrees, or null for the page's own.
-export async function openPages(bytes, password) {
+// hidden: numbers of annotations not to draw (marks back in the editor as overlays, readMarks in pdf.js).
+export async function openPages(bytes, password, hidden = []) {
   const port = newWorker?.()
   const worker = port && new PDFWorker({ port })
   // slice: pdf.js takes ownership of the buffer. isEvalSupported: the CSP forbids eval
@@ -35,6 +36,8 @@ export async function openPages(bytes, password) {
     await close()
     throw e
   }
+  for (const n of hidden) doc.annotationStorage.setValue(`${n}R`, { noView: true }) // pdf.js's id for n 0 R
+  const annotationMode = hidden.length ? AnnotationMode.ENABLE_STORAGE : AnnotationMode.ENABLE
   return {
     count: doc.numPages,
     // canvas.black: still pure black after a second try (a lost page, or one that really is black)
@@ -49,7 +52,7 @@ export async function openPages(bytes, password) {
         canvas = document.createElement('canvas')
         canvas.width = Math.ceil(viewport.width)
         canvas.height = Math.ceil(viewport.height)
-        await page.render({ canvas, viewport }).promise
+        await page.render({ canvas, viewport, annotationMode }).promise
         canvas.black = allBlack(canvas)
         if (!canvas.black) break
       }
@@ -90,8 +93,8 @@ function allBlack(canvas) {
 }
 
 // Draws pages one at a time and hands each canvas to onPage(index, canvas). pages: 0-based (default all).
-export async function renderPages(bytes, { password, pages, scale, rotation = null }, onPage) {
-  const doc = await openPages(bytes, password)
+export async function renderPages(bytes, { password, pages, scale, rotation = null, hidden }, onPage) {
+  const doc = await openPages(bytes, password, hidden)
   try {
     for (const i of pages ?? Array.from({ length: doc.count }, (_, k) => k)) await onPage(i, await doc.draw(i, scale, rotation))
   } finally {
@@ -109,9 +112,9 @@ export async function pageThumb(bytes) {
 }
 
 // thumbnails unrotated (the card applies rotation) as JPEG data URLs
-export async function renderThumbs(bytes, password, onThumb) {
+export async function renderThumbs(bytes, password, onThumb, hidden) {
   try {
-    await renderPages(bytes, { password, rotation: 0, scale: (w, h) => THUMB / Math.max(w, h) },
+    await renderPages(bytes, { password, rotation: 0, scale: (w, h) => THUMB / Math.max(w, h), hidden },
       (i, canvas) => onThumb(i, canvas.toDataURL('image/jpeg', 0.8)))
   } catch (e) {
     console.warn('thumbnail', e) // cards keep their placeholder

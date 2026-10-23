@@ -934,9 +934,78 @@ async function addMark(out, alloc, pageRef, o, box, drawing) {
   return new Ref(annot)
 }
 
-// parts: [{ doc, index, rotate, overlays?, crop?, text? } | { size: [w, h], rotate, overlays? }] in output order.
+// The entries addMark writes, by subtype (notes had a Popup before): an annotation with no others is ours, so
+// it can come back to the editor as the mark it was. Others' (an author, replies, rich text) stay as they are.
+const OWN_COMMON = ['Type', 'Subtype', 'C', 'Rect', 'F', 'P', 'CreationDate', 'M', 'AP']
+const OWN = { Ink: ['InkList', 'BS', 'IT'], Highlight: ['QuadPoints'], Underline: ['QuadPoints'], StrikeOut: ['QuadPoints'], Square: ['BS', 'IC'],
+  Circle: ['BS', 'IC'], Line: ['L', 'BS', 'LE'], Text: ['Name', 'Contents', 'Open', 'Popup'], FreeText: ['Contents', 'DA'] }
+
+// The marks addMark wrote on page `index`, back as overlays, and the refs of those annotations (and their
+// popups) for buildPdf's drop and for drawing the page without them. A mark comes back placed at the rotation
+// it was put at where that shows (the way a text mark's lines run, a spread note's Matrix), else the page's own.
+// ponytail: refs are taken as generation 0, as nearly all are; pdf.js would still draw one with another.
+export function readMarks(doc, index) {
+  const { get } = doc, box = pageBox(doc, index)
+  const turnOf = (dx, dy) => (Math.abs(dx) >= Math.abs(dy) ? (dx > 0 ? 0 : 180) : dy > 0 ? 90 : 270) // display x axis in page space
+  let rot, W, H, frac
+  const at = (r) => { // page space -> fractions of the page as shown turned by r
+    const [a, b, c, d, e, f] = displayMatrix(box, r), det = a * d - b * c
+    rot = r
+    ;[W, H] = displaySize(box, r)
+    frac = (x, y) => [(d * (x - e) - c * (y - f)) / det / W, 1 - (-b * (x - e) + a * (y - f)) / det / H]
+  }
+  const nums = (v) => (get(v) ?? []).map((n) => Number(get(n)))
+  const hex = (v) => '#' + nums(v).map((n) => Math.round(n * 255).toString(16).padStart(2, '0')).join('')
+  const bounds = (ps, padX = 0, padY = padX) => {
+    const xs = ps.map((p) => p[0]), ys = ps.map((p) => p[1])
+    const x = Math.min(...xs) - padX, y = Math.min(...ys) - padY
+    return { x, y, w: Math.max(...xs) + padX - x, h: Math.max(...ys) + padY - y }
+  }
+  const rel = (p, v) => [(p[0] - v.x) / v.w, (p[1] - v.y) / v.h]
+  const pairs = (list) => Array.from({ length: list.length / 2 }, (_, k) => frac(list[2 * k], list[2 * k + 1]))
+  const marks = [], refs = []
+  for (const r of get(doc.pages[index].dict.get('Annots')) ?? []) {
+    const o = get(r), type = o instanceof Map && get(o.get('Subtype'))?.v
+    if (!(r instanceof Ref) || !OWN[type] || ![...o.keys()].every((k) => OWN_COMMON.includes(k) || OWN[type].includes(k))) continue
+    let m
+    try { // one that can't be read stays in the page as it is
+      const color = o.has('C') ? hex(o.get('C')) : '#000000', width = Number(get(get(o.get('BS'))?.get('W'))) || 1
+      const [x0, y0, x1, y1] = nums(o.get('Rect')), q = nums(o.get('QuadPoints')), matrix = nums(get(get(get(o.get('AP'))?.get('N'))?.dict?.get('Matrix')))
+      at(q.length ? turnOf(q[2] - q[0], q[3] - q[1]) : type === 'FreeText' && matrix.length ? turnOf(matrix[0], matrix[1]) : pageInfo(doc, index).rotate)
+      if (type === 'Ink') {
+        const lines = get(o.get('InkList')).map(nums).map(pairs), v = bounds(lines.flat(), width / 2 / W, width / 2 / H)
+        m = { kind: 'ink', ...v, color, width, marker: get(o.get('IT')) === N('InkHighlight'), lines: lines.map((l) => l.flatMap((p) => rel(p, v))) }
+      } else if (OWN[type][0] === 'QuadPoints') {
+        const lines = Array.from({ length: Math.floor(q.length / 8) }, (_, k) => bounds(pairs(q.slice(8 * k, 8 * k + 8))))
+        const v = bounds(lines.flatMap((l) => [[l.x, l.y], [l.x + l.w, l.y + l.h]]))
+        m = { kind: type.toLowerCase(), ...v, color, rects: lines.map((l) => [...rel([l.x, l.y], v), l.w / v.w, l.h / v.h]) }
+      } else if (type === 'Square' || type === 'Circle') { // the Rect is the shape plus 1pt
+        m = { kind: type.toLowerCase(), ...bounds([frac(x0 + 1, y0 + 1), frac(x1 - 1, y1 - 1)]), color, width, fill: o.has('IC') ? hex(o.get('IC')) : null }
+      } else if (type === 'Line') { // a box around the ends, a little across at least so it can be grabbed
+        const [p1, p2] = pairs(nums(o.get('L'))), v = bounds([p1, p2])
+        for (const [pos, size] of [['x', 'w'], ['y', 'h']]) if (v[size] < 0.01) { v[pos] -= (0.01 - v[size]) / 2; v[size] = 0.01 }
+        m = { kind: get(get(o.get('LE'))?.[1]) === N('OpenArrow') ? 'arrow' : 'line', ...v, color, width, ends: [...rel(p1, v), ...rel(p2, v)] }
+      } else { // a note: an icon pinned by its top-left corner, or spread out as a box (FreeText)
+        const text = o.has('Contents') ? decodeText(get(o.get('Contents')).bytes) : ''
+        const [x, y] = frac(x0, y1)
+        m = type === 'Text'
+          ? { kind: 'note', x, y, w: NOTE_SIZE / W, h: NOTE_SIZE / H, color, text }
+          : { kind: 'note', ...bounds([frac(x0, y0), frac(x1, y1)]), color, text, open: true }
+      }
+      if (![m.x, m.y, m.w, m.h].every(Number.isFinite)) continue
+    } catch {
+      continue
+    }
+    marks.push({ ...m, rot })
+    refs.push(r.num)
+    if (get(o.get('Popup')) instanceof Map && o.get('Popup') instanceof Ref) refs.push(o.get('Popup').num)
+  }
+  return { marks, refs }
+}
+
+// parts: [{ doc, index, rotate, overlays?, crop?, text?, drop? } | { size: [w, h], rotate, overlays? }] in output order.
 // size makes a blank page; crop ([left, bottom, right, top] in the page's own space) narrows what shows;
-// text is an invisible OCR text layer (see decorate).
+// text is an invisible OCR text layer (see decorate); drop: annotation numbers to leave out (readMarks).
 // options: { level: 'lossless' or a key of LEVELS, gray: images to grayscale, numbers, watermark, flatten,
 // textImage and fonts (see decorate), impose: 1 | 2 | 4 (see impose), strip: drop hidden info, encrypt (see encryptAll) }
 export async function buildPdf(parts, { level, gray, numbers, watermark, flatten, textImage, fonts, impose: per, strip, encrypt } = {}) {
@@ -976,13 +1045,16 @@ export async function buildPdf(parts, { level, gray, numbers, watermark, flatten
     return v
   }
 
-  parts.forEach(({ doc, index, rotate, size, crop }, i) => {
+  parts.forEach(({ doc, index, rotate, size, crop, drop }, i) => {
     if (size) {
       out[slots[i]] = new Map([['Type', N('Page')], ['Parent', new Ref(2)], ['MediaBox', [0, 0, ...size]], ['Rotate', norm(rotate)], ['Resources', new Map()]])
       return
     }
     const page = doc.pages[index]
-    const d = copy(doc, page.dict)
+    const own = drop?.length // marks taken back into the editor (readMarks) come again as overlays
+      ? new Map([...page.dict].map(([k, v]) => [k, k === 'Annots' ? (doc.get(v) ?? []).filter((r) => !(r instanceof Ref && drop.includes(r.num))) : v]))
+      : page.dict
+    const d = copy(doc, own)
     for (const k of INHERITED) if (page.attrs[k] !== undefined) d.set(k, copy(doc, page.attrs[k]))
     d.set('Parent', new Ref(2))
     d.set('Rotate', norm((Number(doc.get(page.attrs.Rotate)) || 0) + rotate))

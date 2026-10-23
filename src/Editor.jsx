@@ -111,7 +111,7 @@ export default function Editor({ page, source, onApply, onClose, at = 0, total =
     let live = true
     if (source) { // a blank page has none: the paper stays white
       (async () => {
-        const doc = await openPages(source.bytes, source.password)
+        const doc = await openPages(source.bytes, source.password, source.hidden)
         try {
           const canvas = await doc.draw(page.index, (w, h) => VIEW / Math.max(w, h), rot)
           if (!live) return
@@ -775,7 +775,7 @@ function NoteMenu({ note, fit, textRef, onFocus, onText, onColor, onSpread }) {
       </div>
       <div className="spread" role="group" aria-label="표시 방식">
         <span className="muted">표시 방식</span>
-        <button aria-pressed={!note.open} onClick={() => onSpread(false)} title="쪽에는 아이콘만, 누르면 내용이 뜹니다">아이콘</button>
+        <button aria-pressed={!note.open} onClick={() => onSpread(false)} title="쪽에는 아이콘만, 누르면 내용이 뜹니다. 크롬 PDF 보기에서는 한글 내용이 보이지 않습니다(엣지·아크로뱃은 보임)">아이콘</button>
         <button aria-pressed={!!note.open} onClick={() => onSpread(true)} title="쪽에 내용이 적힌 상자로 보입니다. 크롬 PDF 보기처럼 메모 내용을 띄우지 못하는 프로그램에서도 보입니다">내용</button>
       </div>
     </div>

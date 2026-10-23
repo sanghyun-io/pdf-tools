@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { readPdf, buildPdf, imageToPdf, picturePage, pageInfo, pageBox, moveItems, PasswordError } from './pdf.js'
+import { readPdf, buildPdf, imageToPdf, picturePage, pageInfo, pageBox, moveItems, readMarks, PasswordError } from './pdf.js'
 import { renderThumbs, renderPages, openPages, pageThumb } from './render.js'
 import { prepare, recognize, textLayer } from './ocr/client.js'
 import { imagePixels, textPixels, turnBox, steps, textBoxPixels, tablePixels, boxDrawing, noteDrawing } from './decor.js'
@@ -120,14 +120,16 @@ export default function App() {
         if (!isPdf(file) && !file.type.startsWith('image/')) throw new Error('PDF나 이미지 파일이 아닙니다')
         const bytes = isPdf(file) ? new Uint8Array(await file.arrayBuffer()) : await imageToPdf(file)
         const { doc, password } = await openPdf(bytes, file.name, askPassword)
-        const src = sources.current.push({ name: file.name, doc, hue: HUES[sources.current.length % HUES.length], bytes, password }) - 1
         const added = doc.pages.map((_, index) => {
           const { w, h, rotate } = pageInfo(doc, index)
-          return { id: nextId.current++, src, index, rotate: 0, w, h, base: rotate }
+          const { marks, refs } = readMarks(doc, index) // marks saved from here come back editable
+          return { id: nextId.current++, src: sources.current.length, index, rotate: 0, w, h, base: rotate, ...(marks.length && { overlays: marks, drop: refs }) }
         })
+        // hidden: those marks, left out when the file's pages are drawn (they are drawn as overlays)
+        const src = sources.current.push({ name: file.name, doc, hue: HUES[sources.current.length % HUES.length], bytes, password, hidden: added.flatMap((p) => p.drop ?? []) }) - 1
         setPages((ps) => [...ps, ...added])
         thumbQueue.current = thumbQueue.current.then(() =>
-          renderThumbs(bytes, password, (index, url) => setThumbs((t) => ({ ...t, [`${src}:${index}`]: url }))))
+          renderThumbs(bytes, password, (index, url) => setThumbs((t) => ({ ...t, [`${src}:${index}`]: url })), sources.current[src].hidden))
       } catch (e) {
         errors.push(`${file.name}: ${e.message}`)
       }
@@ -325,7 +327,7 @@ export default function App() {
   // a page and its decorations for its card: redaction boxes shown as black boxes rather than burned in
   async function previewPart(p) {
     const overlays = (await withPictures(p)).map((o) => (o.kind === 'redact' ? { ...o, kind: 'square', color: '#000000', fill: '#000000', width: 0 } : o))
-    return p.blank ? { size: [p.w, p.h], rotate: p.rotate, overlays } : { doc: sources.current[p.src].doc, index: p.index, rotate: p.rotate, overlays }
+    return p.blank ? { size: [p.w, p.h], rotate: p.rotate, overlays } : { doc: sources.current[p.src].doc, index: p.index, rotate: p.rotate, overlays, drop: p.drop }
   }
 
   // what buildPdf gets for each page; withText adds an OCR text layer to pages that have no text
@@ -335,7 +337,7 @@ export default function App() {
     const src = sources.current[p.src]
     const crop = opts.autocrop ? await whiteCrop(p) : null
     if (!p.overlays?.some((o) => o.kind === 'redact')) {
-      const part = { doc: src.doc, index: p.index, rotate: p.rotate, overlays, crop }
+      const part = { doc: src.doc, index: p.index, rotate: p.rotate, overlays, crop, drop: p.drop }
       if (withText) part.text = await ocrText(p, src.bytes, src.password, p.index, pageBox(src.doc, p.index), `${p.src}:${p.index}:${p.base + p.rotate}`)
       return part
     }
@@ -377,7 +379,7 @@ export default function App() {
   async function burnRedactions(p) {
     const src = sources.current[p.src]
     let pdf
-    await renderPages(src.bytes, { password: src.password, pages: [p.index], rotation: 0, scale: () => REDACT_DPI / 72 }, async (_, canvas) => {
+    await renderPages(src.bytes, { password: src.password, pages: [p.index], rotation: 0, scale: () => REDACT_DPI / 72, hidden: src.hidden }, async (_, canvas) => {
       if (canvas.black) blackPages.current.add(pages.indexOf(p) + 1)
       const ctx = canvas.getContext('2d')
       ctx.fillStyle = '#000'
