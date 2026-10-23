@@ -33,6 +33,7 @@
   - 데이터만 Tesseract 것을 쓴다: `public/ocr/*.traineddata.gz` = [tessdata_fast 4.1.0](https://github.com/tesseract-ocr/tessdata_fast) kor·eng를 gzip한 것 (Apache License 2.0, `public/ocr/LICENSE`)
   - 인식은 worker에서 돌아 화면이 멈추지 않는다 (`src/ocr/worker.js`, `client.js`). 글자 층 글꼴은 글자 모양이 없는 TrueType을 직접 만든다 (`src/glyphless.js`)
 - 브라우저 호환: 썸네일은 pdf.js legacy 빌드라 iOS 16.4+/Chrome 97+ 에서 동작. 그보다 오래된 브라우저는 안내만 표시 (`public/check.js`)
+- 앱으로 설치(PWA): 크롬·엣지에서 설치하면 자기 창과 아이콘으로 열린다. 웹 버전은 한 번 열면 앱 파일 전부(코드, pdf.js, OCR 데이터)를 PC에 저장해 두고 그다음부터 인터넷 없이 열린다 (`src/sw.js`, 파일 목록과 버전은 빌드 때 `vite.config.js`의 offline이 채움, 앱 정보 `public/manifest.webmanifest`). 새 버전은 열려 있는 동안 받아 두었다가 다음에 열 때 바뀐다. 단일 파일에는 넣지 않는다
 - 카카오톡 등 앱 안 브라우저에서는 저장이 막힐 수 있어 외부 브라우저로 열라는 안내 표시 (`src/inapp.js`)
 - 탭 이름은 브라우저 언어에 따라 바뀜 (한·영·일·중, 그 외 영어)
 
@@ -40,7 +41,7 @@
 npm install
 npm run dev     # http://localhost:17020
 npm test        # 출력물을 pdf.js로 다시 읽어 검증
-npm run build   # dist/ 정적 파일
+npm run build   # dist/ 정적 파일 (+ dist/sw.js: 인터넷 없이 열기·앱 설치용)
 npm run build:single   # 설치·인터넷 없이 더블클릭으로 여는 파일: dist/pdf-tools.html (6 MB, 그중 OCR 데이터 4 MB)
 ```
 

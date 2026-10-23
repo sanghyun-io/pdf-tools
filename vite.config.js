@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
-import { readFileSync } from 'node:fs'
+import { readdirSync, readFileSync } from 'node:fs'
+import { join, relative } from 'node:path'
 import react from '@vitejs/plugin-react'
 import { defineConfig } from 'vite'
 
@@ -24,6 +25,26 @@ const csp = {
   transformIndexHtml: (html) => html.replace('<head>', `<head>\n    <meta http-equiv="Content-Security-Policy" content="${WEB}" />`),
 }
 
+// The web build's sw.js (src/sw.js): the app's files to keep on the PC, under a version that changes with any
+// of them, so the page opens offline and can be installed as an app (public/manifest.webmanifest).
+const offline = {
+  name: 'offline',
+  apply: 'build',
+  generateBundle: {
+    order: 'post', // index.html is in the bundle by then
+    handler(_, bundle) {
+      const copied = readdirSync('public', { recursive: true, withFileTypes: true }).filter((f) => f.isFile())
+        .map((f) => relative('public', join(f.parentPath, f.name)).replaceAll('\\', '/'))
+      const worker = readFileSync('src/sw.js', 'utf8'), hash = createHash('sha256').update(worker)
+      for (const [name, file] of Object.entries(bundle)) hash.update(name).update(file.code ?? file.source)
+      for (const name of copied) hash.update(name).update(readFileSync(join('public', name)))
+      const source = worker.replace('__VERSION__', hash.digest('hex').slice(0, 12))
+        .replace('__FILES__', JSON.stringify(['./', ...Object.keys(bundle), ...copied]))
+      this.emitFile({ type: 'asset', fileName: 'sw.js', source })
+    },
+  },
+}
+
 // `vite build --mode single` adds dist/pdf-tools.html: one file that works opened straight from disk, offline,
 // OCR data included (about 4 of its 6 MB). file:// refuses module scripts and workers loaded from other
 // files, so everything goes inline.
@@ -45,7 +66,7 @@ const single = (fileName) => ({
       }
       const icon = `data:image/png;base64,${readFileSync('public/favicon-32.png').toString('base64')}`
       let html = bundle['index.html'].source
-        .replace(/ *<link rel="(icon|apple-touch-icon)".*\n/g, '')
+        .replace(/ *<link rel="(icon|apple-touch-icon|manifest)".*\n/g, '') // no app install from disk
         // after the charset: from disk there is no HTTP header, so it must sit in the first 1024 bytes
         .replace('<meta charset="UTF-8" />', (m) => `${m}\n    <link rel="icon" href="${icon}" />`)
       html = inline(html, '<script src="./check.js"></script>', script(readFileSync('public/check.js', 'utf8')))
@@ -68,7 +89,7 @@ export default defineConfig(({ mode }) => {
   const one = mode === 'single' ? 'pdf-tools.html' : null
   return {
     base: './', // works under any sub-path, e.g. https://<user>.github.io/pdf-tools/
-    plugins: [react(), csp, one && single(one)],
+    plugins: [react(), csp, one ? single(one) : offline],
     assetsInclude: ['**/*.traineddata.gz'], // the OCR data, inlined into pdf-tools.html (src/ocr/client.js)
     server: { port: 17020, strictPort: true },
     // single files go next to the web build instead of replacing it
